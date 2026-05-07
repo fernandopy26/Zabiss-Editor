@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Zabiss Editor",
+  "version": "1.0.0",
+  "identifier": "studio.neko.zabiss-editor",
+  "build": {
+    "frontendDist": "../dist",
+    "beforeBuildCommand": "cp index.html style.css app.js coi-serviceworker.js favicon.svg dist/"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "Zabiss Editor",
+        "width": 1200,
+        "height": 860,
+        "minWidth": 860,
+        "minHeight": 600,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' https: data: blob: asset: http://asset.localhost; media-src * asset: http://asset.localhost blob: data:; img-src * data: asset: http://asset.localhost blob:; connect-src https://api.groq.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com https://fonts.googleapis.com https://fonts.gstatic.com"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {}
+  }
+}

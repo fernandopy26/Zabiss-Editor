@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="g" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%"   stop-color="#7c3aed"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+    <clipPath id="clip">
+      <rect width="64" height="64" rx="14"/>
+    </clipPath>
+  </defs>
+
+  <!-- Fundo arredondado escuro -->
+  <rect width="64" height="64" rx="14" fill="#0d0d2b"/>
+
+  <!-- Borda sutil com gradiente -->
+  <rect width="64" height="64" rx="14" fill="none" stroke="url(#g)" stroke-width="2" opacity="0.6"/>
+
+  <!-- Letra Z com gradiente -->
+  <text x="32" y="47"
+    font-family="'Arial Black', 'Impact', sans-serif"
+    font-size="42"
+    font-weight="900"
+    text-anchor="middle"
+    fill="url(#g)">Z</text>
+</svg>

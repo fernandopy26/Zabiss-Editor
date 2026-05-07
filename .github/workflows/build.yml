@@ -1,0 +1,97 @@
+name: Build Zabiss Editor
+
+on:
+  push:
+    tags:
+      - 'v*'        # roda quando você criar uma tag tipo v1.0.0
+  workflow_dispatch: # permite rodar manualmente pelo painel do GitHub
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows
+          - os: ubuntu-22.04
+            name: Linux
+          - os: macos-latest
+            name: macOS
+
+    runs-on: ${{ matrix.os }}
+    name: Build (${{ matrix.name }})
+
+    steps:
+      # 1. Baixa o código do repositório
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Instala Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # 3. Instala Rust
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 4. Cache do Rust (acelera builds futuros)
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # 5. Dependências do Linux (GTK, WebKit etc.)
+      - name: Install Linux dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      # 6. Instala dependências npm
+      - name: Install npm dependencies
+        run: npm install
+
+      # 7. Copia arquivos web para dist/
+      - name: Prepare dist folder
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp index.html style.css app.js coi-serviceworker.js favicon.svg dist/
+
+      # 8. Builda o app Tauri (gera o instalador)
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Zabiss Editor ${{ github.ref_name }}'
+          releaseBody: |
+            ## Zabiss Editor ${{ github.ref_name }}
+
+            ### Instaladores
+            - **Windows**: baixe o arquivo `.msi`
+            - **Linux**: baixe o `.deb` (Ubuntu/Debian) ou `.AppImage`
+            - **macOS**: baixe o `.dmg`
+
+            ### Como instalar
+            - **Windows**: duplo clique no `.msi` → seguir as instruções
+            - **Linux .deb**: duplo clique ou `sudo dpkg -i arquivo.deb`
+            - **Linux .AppImage**: dar permissão de execução e clicar
+            - **macOS**: arrastar para Applications
+
+            ---
+            Feito por [Neko Studio](mailto:nekostudio.contato@gmail.com)
+          releaseDraft: false
+          prerelease: false

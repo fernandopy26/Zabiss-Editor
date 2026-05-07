@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Zabiss Editor — Processe, corte e narre vídeos com IA diretamente no navegador." />
+  <title>Zabiss Editor</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><defs><linearGradient id='g' x1='0%25' y1='0%25' x2='100%25' y2='100%25'><stop offset='0%25' stop-color='%237c3aed'/><stop offset='100%25' stop-color='%2306b6d4'/></linearGradient></defs><rect width='64' height='64' rx='14' fill='%230d0d2b'/><rect width='64' height='64' rx='14' fill='none' stroke='url(%23g)' stroke-width='2' opacity='.5'/><text x='32' y='48' font-family='Arial Black,sans-serif' font-size='44' font-weight='900' text-anchor='middle' fill='url(%23g)'>Z</text></svg>" />
+
+  <!-- COI Service Worker (necessário para FFmpeg.wasm no GitHub Pages) -->
+  <script src="coi-serviceworker.js"></script>
+
+  <!-- FFmpeg.wasm 0.11.6 via jsDelivr (API mais estável para CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+
+  <!-- JSZip -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<!-- Animated background -->
+<div class="bg-blobs">
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+  <div class="blob blob-3"></div>
+</div>
+
+<!-- FFmpeg loading overlay -->
+<div class="ffmpeg-loader" id="ffmpeg-loader">
+  <div class="loader-spinner"></div>
+  <div class="loader-title">Carregando Zabiss Editor</div>
+  <div class="loader-sub" id="loader-sub">Inicializando…</div>
+  <div class="loader-progress-wrap">
+    <div class="loader-bar-bg">
+      <div class="loader-bar-fill" id="loader-bar-fill"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Header -->
+<header>
+  <div class="container">
+    <div class="header-inner">
+      <div class="logo">
+        <div class="logo-icon">✂</div>
+        <span class="logo-text">Zabiss Editor</span>
+        <span class="logo-badge">BETA</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px;font-size:13px;color:var(--text-muted)">
+        <span>Tudo no navegador • Sem servidor</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="container">
+
+    <!-- Hero -->
+    <div class="hero">
+      <h1 class="hero-title">Processe vídeos com<br>inteligência artificial</h1>
+      <p class="hero-sub">
+        Corte, transcreva e narre seus vídeos em partes de 8 segundos —
+        100% no navegador, sem upload para servidores.
+      </p>
+    </div>
+
+    <!-- STEP 1: Mode Selection -->
+    <div class="section">
+      <div class="section-label">Passo 1 — Escolha o modo</div>
+      <div class="modes-grid">
+
+        <!-- Cut only -->
+        <div class="mode-card" data-mode="cut">
+          <div class="mode-badge badge-free">Grátis</div>
+          <div class="mode-check">✓</div>
+          <div class="mode-card-content">
+            <div class="mode-icon mode-icon-cut">✂️</div>
+            <div class="mode-name">Corte de Vídeo</div>
+            <div class="mode-desc">
+              Divide seu vídeo em partes de 8 segundos.<br>
+              Exporta <strong>Parte 1.mp4</strong>, <strong>Parte 2.mp4</strong>…<br>
+              Não requer API.
+            </div>
+          </div>
+        </div>
+
+        <!-- Transcription -->
+        <div class="mode-card" data-mode="transcribe">
+          <div class="mode-badge badge-ai">IA · Groq Whisper</div>
+          <div class="mode-check">✓</div>
+          <div class="mode-card-content">
+            <div class="mode-icon mode-icon-transcribe">🎙️</div>
+            <div class="mode-name">Texto do Vídeo</div>
+            <div class="mode-desc">
+              Transcreve o áudio a cada 8 segundos.<br>
+              Exporta <strong>Parte 1.txt</strong>, <strong>Parte 2.txt</strong>…<br>
+              Usa Groq Whisper (gratuito).
+            </div>
+          </div>
+        </div>
+
+        <!-- Prompt generator -->
+        <div class="mode-card" data-mode="prompts">
+          <div class="mode-badge badge-ai">IA · Groq Vision</div>
+          <div class="mode-check">✓</div>
+          <div class="mode-card-content">
+            <div class="mode-icon mode-icon-prompts">✨</div>
+            <div class="mode-name">Gerador de Prompts</div>
+            <div class="mode-desc">
+              Analisa um frame a cada 8 segundos e escreve
+              uma narrativa estilo história, com contexto acumulado.<br>
+              Usa Groq Vision.
+            </div>
+          </div>
+        </div>
+
+        <!-- Combined -->
+        <div class="mode-card" data-mode="combined">
+          <div class="mode-badge badge-combo">Completo</div>
+          <div class="mode-check">✓</div>
+          <div class="mode-card-content">
+            <div class="mode-icon mode-icon-combined">⚡</div>
+            <div class="mode-name">Modo Conjunto</div>
+            <div class="mode-desc">
+              Corta o vídeo <em>e</em> gera prompts narrativos ao mesmo tempo.<br>
+              Exporta <strong>Parte N.mp4</strong> + <strong>Parte N.txt</strong> para cada segmento.
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- STEP 2: Upload -->
+    <div class="section">
+      <div class="section-label">Passo 2 — Tipo de mídia e arquivo</div>
+
+      <!-- Media type toggle -->
+      <div class="media-type-toggle">
+        <button class="media-type-btn active" data-type="video">
+          <span class="mtype-icon">🎬</span>
+          <span class="mtype-label">Vídeo</span>
+          <span class="mtype-fmts">MP4, MOV, AVI, WebM…</span>
+        </button>
+        <button class="media-type-btn" data-type="audio">
+          <span class="mtype-icon">🎵</span>
+          <span class="mtype-label">Áudio</span>
+          <span class="mtype-fmts">MP3, WAV, M4A, FLAC…</span>
+        </button>
+      </div>
+
+      <div class="upload-zone" id="upload-zone">
+
+        <!-- Default state -->
+        <div id="upload-default-area">
+          <div class="upload-icon" id="upload-icon-el">🎬</div>
+          <div class="upload-title" id="upload-title-el">Arraste seu vídeo aqui</div>
+          <div class="upload-sub" id="upload-sub-el">MP4, MOV, AVI, WebM e outros formatos de vídeo</div>
+          <button class="upload-btn" type="button">
+            <span>📁</span> Escolher arquivo
+          </button>
+        </div>
+
+        <!-- File loaded state -->
+        <div class="upload-preview-area" id="upload-preview-area" style="display:none">
+          <div class="video-info">
+            <div class="video-thumb-wrap">
+              <img class="video-thumb" id="video-thumb" src="" alt="Thumb" />
+              <div class="audio-thumb" id="audio-thumb" style="display:none">
+                <div class="audio-bars">
+                  <span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span>
+                </div>
+              </div>
+            </div>
+            <div class="video-details">
+              <div class="video-name" id="video-name">arquivo</div>
+              <div class="video-meta" id="video-meta">—</div>
+              <div class="video-stats">
+                <span class="video-stat" id="video-stat-dur">⏱ —</span>
+                <span class="video-stat" id="video-stat-size">💾 —</span>
+                <span class="video-stat" id="video-stat-segs">✂ —</span>
+              </div>
+            </div>
+          </div>
+          <div class="duration-warning" id="duration-warning" style="display:none"></div>
+          <button class="upload-change-btn" id="upload-change-btn" type="button">
+            🔄 Trocar arquivo
+          </button>
+        </div>
+
+      </div>
+      <input type="file" id="file-input" accept="video/*,audio/*" />
+    </div>
+
+    <!-- STEP 3: Settings -->
+    <div class="section">
+      <div class="section-label">Passo 3 — Configurações</div>
+      <div class="settings-panel" id="settings-panel">
+        <div class="settings-header" id="settings-header">
+          <div class="settings-header-left">
+            <span>⚙️</span>
+            <span class="settings-title">Opções avançadas</span>
+          </div>
+          <span class="settings-arrow">▼</span>
+        </div>
+        <div class="settings-body">
+          <div class="settings-inner">
+            <div class="settings-grid">
+
+              <!-- Segment duration -->
+              <div class="form-group">
+                <label for="seg-dur-input">Duração de cada parte</label>
+                <div class="segment-duration-wrap">
+                  <input type="number" id="seg-dur-input" min="1" max="300" value="8" />
+                  <span>segundos</span>
+                </div>
+                <div class="form-hint">Padrão: 8s. Mínimo 1s.</div>
+              </div>
+
+              <!-- Language (transcription only) -->
+              <div class="form-group" id="lang-group" style="display:none">
+                <label for="lang-select">Idioma do áudio</label>
+                <div class="lang-select-wrap">
+                  <select id="lang-select">
+                    <option value="auto">Detectar automaticamente</option>
+                    <option value="pt" selected>Português</option>
+                    <option value="en">Inglês</option>
+                    <option value="es">Espanhol</option>
+                    <option value="fr">Francês</option>
+                    <option value="de">Alemão</option>
+                    <option value="it">Italiano</option>
+                    <option value="ja">Japonês</option>
+                    <option value="zh">Chinês</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Prompt creativity level -->
+              <div class="form-group full-width" id="level-group" style="display:none">
+                <label>Nível de modificação do conteúdo</label>
+                <div class="level-selector" id="level-selector">
+                  <button class="level-btn" data-level="1">
+                    <span class="level-num">1</span>
+                    <span class="level-name">Fiel</span>
+                  </button>
+                  <button class="level-btn" data-level="2">
+                    <span class="level-num">2</span>
+                    <span class="level-name">Suave</span>
+                  </button>
+                  <button class="level-btn active" data-level="3">
+                    <span class="level-num">3</span>
+                    <span class="level-name">Equilibrado</span>
+                  </button>
+                  <button class="level-btn" data-level="4">
+                    <span class="level-num">4</span>
+                    <span class="level-name">Criativo</span>
+                  </button>
+                  <button class="level-btn" data-level="5">
+                    <span class="level-num">5</span>
+                    <span class="level-name">Livre</span>
+                  </button>
+                </div>
+                <div class="level-desc" id="level-desc">
+                  Equilibrado entre fidelidade e criatividade — mantém o tema central com linguagem narrativa e metáforas moderadas.
+                </div>
+              </div>
+
+              <!-- Custom prompt -->
+              <div class="form-group full-width" id="custom-prompt-group" style="display:none">
+                <label for="custom-prompt-input">
+                  Prompt personalizado
+                  <span style="font-weight:400;color:var(--text-faint)">(opcional — sobrepõe o nível)</span>
+                </label>
+                <div class="textarea-wrap">
+                  <textarea id="custom-prompt-input" rows="4"
+                    placeholder="Ex: Você é um roteirista de anime. Descreva cada cena como se fosse um episódio épico, com nomes de técnicas e referências à cultura japonesa..."
+                    maxlength="1500"></textarea>
+                  <div class="textarea-counter"><span id="custom-prompt-len">0</span>/1500</div>
+                </div>
+                <div class="form-hint">
+                  Escreva as instruções para a IA no estilo que quiser. Deixe vazio para usar o nível selecionado acima.
+                </div>
+              </div>
+
+              <!-- Vision model -->
+              <div class="form-group full-width" id="model-group" style="display:none">
+                <label for="model-select">Modelo de IA (visão/prompts)</label>
+                <select id="model-select">
+                  <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout 17B (recomendado)</option>
+                  <option value="meta-llama/llama-4-maverick-17b-128e-instruct">Llama 4 Maverick 17B</option>
+                  <option value="llama-3.2-11b-vision-preview">Llama 3.2 11B Vision (alternativa)</option>
+                  <option value="llama-3.2-90b-vision-preview">Llama 3.2 90B Vision (mais lento)</option>
+                </select>
+                <div class="form-hint">Se ocorrer erro "model not found", tente outro modelo.</div>
+              </div>
+
+              <!-- API Key -->
+              <div class="form-group full-width" id="api-key-group" style="display:none">
+                <label for="api-key-input">Chave de API Groq</label>
+                <div class="input-wrap">
+                  <input type="password" id="api-key-input" placeholder="gsk_…" autocomplete="off" />
+                  <span class="input-icon" id="toggle-key" title="Mostrar/ocultar">👁</span>
+                </div>
+                <div class="form-hint">
+                  Obtenha sua chave gratuita em
+                  <a href="https://console.groq.com/keys" target="_blank" rel="noopener" style="color:var(--purple-light)">console.groq.com/keys</a>
+                </div>
+                <div class="api-key-note" id="api-key-note" style="display:none">
+                  <span>🔒</span>
+                  <span>Sua chave é salva <strong>apenas no seu navegador</strong> (localStorage). Ela nunca é enviada aos nossos servidores.</span>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- STEP 4: Process -->
+    <div class="section process-wrap">
+      <button class="process-btn" id="process-btn" type="button">
+        <span class="btn-spinner"></span>
+        <span class="btn-icon">⚡</span>
+        <span>Processar Vídeo</span>
+      </button>
+      <p style="margin-top:14px;font-size:13px;color:var(--text-faint);text-align:center">
+        O processamento ocorre 100% no seu navegador — seu vídeo nunca sai do seu dispositivo.
+      </p>
+    </div>
+
+    <!-- STEP 5: Progress -->
+    <div class="section progress-section" id="progress-section">
+      <div class="section-label">Processando</div>
+      <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px;">
+        <div class="progress-header">
+          <span class="progress-label" id="progress-label">Iniciando…</span>
+          <span class="progress-pct" id="progress-pct">0%</span>
+        </div>
+        <div class="progress-bar-bg">
+          <div class="progress-bar-fill" id="progress-bar-fill"></div>
+        </div>
+        <div class="progress-segments" id="progress-segments"></div>
+        <div class="log-console" id="log-console"></div>
+      </div>
+    </div>
+
+    <!-- STEP 6: Results -->
+    <div class="section results-section" id="results-section">
+      <div class="section-label">Resultado</div>
+      <div class="results-card">
+        <div class="results-summary">
+          <div class="results-icon">🎉</div>
+          <div>
+            <div class="results-title" id="results-title">Arquivos gerados</div>
+            <div class="results-sub">Pronto para baixar</div>
+            <div class="results-stats" id="results-stats"></div>
+          </div>
+        </div>
+        <div class="file-list" id="file-list"></div>
+        <div class="results-actions">
+          <button class="btn-primary" id="btn-download-zip" type="button">
+            📦 Baixar ZIP
+          </button>
+          <button class="btn-secondary" id="btn-save-folder" type="button">
+            📁 Salvar em pasta
+          </button>
+        </div>
+        <div style="padding:0 24px 20px">
+          <button class="btn-new" id="btn-new-process" type="button">
+            ↩ Novo processamento
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- CONVERSOR -->
+    <div class="section conv-section">
+      <div class="section-label">Conversor — Vídeo para Áudio</div>
+      <div class="conv-card">
+        <div class="conv-header">
+          <div class="conv-header-icon">🔄</div>
+          <div>
+            <div style="font-weight:600;font-size:15px">Extrair Áudio de Vídeo</div>
+            <div style="font-size:13px;color:var(--text-muted);margin-top:3px">Converta qualquer vídeo para MP3, WAV ou M4A</div>
+          </div>
+        </div>
+        <div class="conv-body">
+          <div class="conv-drop" id="conv-drop">
+            <span style="font-size:28px">🎬</span>
+            <span>Arraste um vídeo ou clique para selecionar</span>
+            <span style="font-size:12px;color:var(--text-faint)">MP4, MOV, AVI, MKV, WebM…</span>
+          </div>
+          <input type="file" id="conv-file-input" accept="video/*" style="display:none" />
+          <div class="conv-file-row" id="conv-file-row" style="display:none">
+            <span style="font-size:18px">🎬</span>
+            <span id="conv-filename" style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+          </div>
+          <div class="conv-controls">
+            <div class="form-group" style="flex:1">
+              <label for="conv-format">Formato de saída</label>
+              <select id="conv-format">
+                <option value="mp3">MP3 — 192kbps (universal)</option>
+                <option value="wav">WAV — sem compressão (qualidade máxima)</option>
+                <option value="m4a">M4A — AAC 192kbps (Apple / alta qualidade)</option>
+              </select>
+            </div>
+            <button class="conv-btn" id="conv-btn" type="button">🎵 Converter e Baixar</button>
+          </div>
+          <pre class="conv-log" id="conv-log"></pre>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /container -->
+</main>
+
+<!-- Toast container -->
+<div class="toast-container" id="toast-container"></div>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <p>
+      <strong style="color:var(--text-muted)">Zabiss Editor</strong> —
+      Processamento 100% local com
+      <a href="https://ffmpegwasm.netlify.app" target="_blank" rel="noopener">FFmpeg.wasm</a> +
+      <a href="https://groq.com" target="_blank" rel="noopener">Groq API</a>
+    </p>
+    <p style="margin-top:8px;font-size:12px">
+      Seu vídeo nunca sai do seu dispositivo. As chamadas de IA (Groq) usam apenas frames e áudio extraídos.
+    </p>
+    <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border);display:flex;align-items:center;justify-content:center;gap:16px;flex-wrap:wrap">
+      <span style="font-size:13px;color:var(--text-faint)">Feito por</span>
+      <span style="font-size:15px;font-weight:700;font-family:'Space Grotesk',sans-serif;background:linear-gradient(90deg,var(--purple-light),var(--cyan-light));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text">Neko Studio</span>
+      <a href="mailto:nekostudio.contato@gmail.com" style="font-size:13px;color:var(--text-faint);text-decoration:none;transition:color .2s" onmouseover="this.style.color='var(--purple-light)'" onmouseout="this.style.color='var(--text-faint)'">nekostudio.contato@gmail.com</a>
+    </div>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

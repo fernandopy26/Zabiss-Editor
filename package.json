@@ -1,0 +1,14 @@
+{
+  "name": "zabiss-editor",
+  "version": "1.0.0",
+  "description": "Zabiss Editor — processador de vídeo e áudio com IA",
+  "author": "Neko Studio <nekostudio.contato@gmail.com>",
+  "scripts": {
+    "dev":   "cp index.html style.css app.js coi-serviceworker.js favicon.svg dist/ && tauri dev",
+    "build": "cp index.html style.css app.js coi-serviceworker.js favicon.svg dist/ && tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
