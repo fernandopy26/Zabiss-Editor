@@ -196,17 +196,17 @@ function getInputExtension(file) {
 }
 
 async function getMediaDuration(file) {
+  // Tauri: usa FFmpeg via Rust (não depende do webview ler o arquivo)
+  if (IS_TAURI) {
+    return tauriInvoke('get_media_duration', { path: ST.inputPath });
+  }
+  // Browser: usa elemento HTML
   return new Promise((resolve, reject) => {
     const el = ST.inputType === 'audio' ? new Audio() : document.createElement('video');
     el.preload = 'metadata';
-    el.onloadedmetadata = () => {
-      if (!IS_TAURI) URL.revokeObjectURL(el.src);
-      resolve(el.duration);
-    };
+    el.onloadedmetadata = () => { URL.revokeObjectURL(el.src); resolve(el.duration); };
     el.onerror = () => reject(new Error('Não foi possível ler o arquivo de mídia. Verifique se o formato é suportado.'));
-    const src = IS_TAURI ? tauriSrc(ST.inputPath) : URL.createObjectURL(file);
-    if (!src) return reject(new Error('Caminho do arquivo inválido.'));
-    el.src = src;
+    el.src = URL.createObjectURL(file);
   });
 }
 
@@ -300,6 +300,15 @@ async function extractAudioSegment(start, end, idx) {
 }
 
 async function extractFrameAtTime(file, timeSec) {
+  // Tauri: usa FFmpeg via Rust para extrair o frame como JPEG base64
+  if (IS_TAURI) {
+    return tauriInvoke('extract_frame_at', {
+      sessionId: tauriSession || 'thumb',
+      path:      ST.inputPath,
+      timeSec,
+    });
+  }
+  // Browser: usa Canvas + HTMLVideoElement
   return new Promise((resolve, reject) => {
     const video  = document.createElement('video');
     const canvas = document.createElement('canvas');
@@ -314,22 +323,16 @@ async function extractFrameAtTime(file, timeSec) {
       if (resolved) return;
       resolved = true;
       canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-      if (!IS_TAURI) URL.revokeObjectURL(video.src);
+      URL.revokeObjectURL(video.src);
       resolve(canvas.toDataURL('image/jpeg', 0.82).split(',')[1]);
     };
     video.onerror = () => {
       if (!resolved) { resolved = true; reject(new Error('Erro ao carregar frame do vídeo.')); }
     };
     setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        if (!IS_TAURI) URL.revokeObjectURL(video.src);
-        reject(new Error('Frame extraction timeout'));
-      }
+      if (!resolved) { resolved = true; URL.revokeObjectURL(video.src); reject(new Error('Frame extraction timeout')); }
     }, 12000);
-    const src = IS_TAURI ? tauriSrc(ST.inputPath) : URL.createObjectURL(file);
-    if (!src) return reject(new Error('Caminho do arquivo inválido.'));
-    video.src = src;
+    video.src = URL.createObjectURL(file);
   });
 }
 
@@ -1202,30 +1205,36 @@ async function loadMediaFromPath(filePath) {
   $('video-name').textContent = info.name;
   $('video-meta').textContent = fmtSize(info.size);
 
-  const el = isAudio ? new Audio() : document.createElement('video');
-  el.preload = 'metadata';
-  el.onloadedmetadata = () => {
-    const dur  = el.duration;
-    const segs = Math.ceil(dur / ST.segDur);
-    $('video-stat-dur').textContent  = `⏱ ${fmtTime(dur)}`;
-    $('video-stat-size').textContent = `💾 ${fmtSize(info.size)}`;
-    $('video-stat-segs').textContent = `✂ ${segs} partes`;
-    $('duration-warning').style.display = 'none'; // Tauri sem limite de tamanho
-  };
-  el.src = tauriSrc(filePath);
+  // Pega duração via FFmpeg (Rust) — não depende do webview ler o arquivo
+  $('video-stat-size').textContent = `💾 ${fmtSize(info.size)}`;
+  $('video-stat-dur').textContent  = '⏱ …';
+  $('video-stat-segs').textContent = '✂ …';
+  $('duration-warning').style.display = 'none';
 
+  tauriInvoke('get_media_duration', { path: filePath })
+    .then(dur => {
+      const segs = Math.ceil(dur / ST.segDur);
+      $('video-stat-dur').textContent  = `⏱ ${fmtTime(dur)}`;
+      $('video-stat-segs').textContent = `✂ ${segs} partes`;
+    })
+    .catch(e => {
+      addLog('Aviso: ' + errMsg(e), 'warn');
+      $('video-stat-dur').textContent  = '⏱ —';
+      $('video-stat-segs').textContent = '✂ —';
+    });
+
+  // Thumbnail via FFmpeg para vídeo, animação CSS para áudio
   if (!isAudio) {
-    const thumbVid = document.createElement('video');
-    thumbVid.onloadedmetadata = () => { thumbVid.currentTime = Math.min(2, thumbVid.duration * 0.1); };
-    thumbVid.onseeked = () => {
-      const cvs = document.createElement('canvas');
-      cvs.width = 240; cvs.height = 135;
-      cvs.getContext('2d').drawImage(thumbVid, 0, 0, 240, 135);
-      $('video-thumb').src = cvs.toDataURL('image/jpeg', 0.7);
-      $('video-thumb').style.display = '';
-      $('audio-thumb').style.display = 'none';
-    };
-    thumbVid.src = tauriSrc(filePath);
+    $('video-thumb').src = '';
+    $('video-thumb').style.display = '';
+    $('audio-thumb').style.display = 'none';
+    tauriInvoke('extract_frame_at', {
+      sessionId: 'thumbnail',
+      path:      filePath,
+      timeSec:   2.0,
+    })
+      .then(b64 => { $('video-thumb').src = `data:image/jpeg;base64,${b64}`; })
+      .catch(() => { /* mantém placeholder */ });
   } else {
     $('video-thumb').style.display = 'none';
     $('audio-thumb').style.display = '';

@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::path::Path;
 use tauri::Manager;
+use base64::{Engine as _, engine::general_purpose};
 
 // ── Estruturas ───────────────────────────────────────────────
 
@@ -130,6 +131,73 @@ fn open_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── Mídia: duração e extração de frame (via FFmpeg) ──────────
+
+/// Obtém a duração de um arquivo de mídia em segundos
+#[tauri::command]
+async fn get_media_duration(app: tauri::AppHandle, path: String) -> Result<f64, String> {
+    let ffmpeg = find_ffmpeg(&app);
+    let output = tokio::process::Command::new(&ffmpeg)
+        .args(["-i", &path, "-f", "null", "-"])
+        .output()
+        .await
+        .map_err(|e| format!("FFmpeg falhou: {}", e))?;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for line in stderr.lines() {
+        if let Some(idx) = line.find("Duration: ") {
+            let after  = &line[idx + 10..];
+            let dur_s  = after.split(',').next().unwrap_or("").trim();
+            let parts: Vec<&str> = dur_s.split(':').collect();
+            if parts.len() == 3 {
+                let h: f64 = parts[0].parse().unwrap_or(0.0);
+                let m: f64 = parts[1].parse().unwrap_or(0.0);
+                let s: f64 = parts[2].parse().unwrap_or(0.0);
+                return Ok(h * 3600.0 + m * 60.0 + s);
+            }
+        }
+    }
+    Err(format!("Não foi possível extrair duração. FFmpeg disse: {}",
+        stderr.lines().rev().take(3).collect::<Vec<_>>().join(" | ")))
+}
+
+/// Extrai um frame em determinado tempo e retorna como JPEG em base64
+#[tauri::command]
+async fn extract_frame_at(
+    app: tauri::AppHandle,
+    session_id: String,
+    path: String,
+    time_sec: f64,
+) -> Result<String, String> {
+    let ffmpeg = find_ffmpeg(&app);
+    let dir = std::env::temp_dir().join("zabiss-editor").join(&session_id);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let out = dir.join(format!("frame_{}.jpg", (time_sec * 1000.0) as u64));
+
+    let output = tokio::process::Command::new(&ffmpeg)
+        .args([
+            "-ss", &time_sec.to_string(),
+            "-i",  &path,
+            "-vframes", "1",
+            "-q:v", "3",
+            "-vf",  "scale='min(1280,iw)':-2",
+            "-y",
+            out.to_str().unwrap(),
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("FFmpeg falhou ao extrair frame: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(stderr.lines().rev().take(3).collect::<Vec<_>>().join(" | "));
+    }
+
+    let bytes = tokio::fs::read(&out).await.map_err(|e| e.to_string())?;
+    let _ = tokio::fs::remove_file(&out).await;
+    Ok(general_purpose::STANDARD.encode(&bytes))
+}
+
 // ── Versão atual do app ──────────────────────────────────────
 
 #[tauri::command]
@@ -155,6 +223,8 @@ pub fn run() {
             copy_file,
             open_folder,
             get_app_version,
+            get_media_duration,
+            extract_frame_at,
         ])
         .run(tauri::generate_context!())
         .expect("Erro ao iniciar Zabiss Editor");
