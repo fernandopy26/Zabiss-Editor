@@ -5,6 +5,10 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag para buildar (ex: v1.0.1)'
+        required: true
 
 permissions:
   contents: write
@@ -24,6 +28,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: Build (${{ matrix.name }})
+    if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - name: Checkout
@@ -50,17 +55,18 @@ jobs:
             libwebkit2gtk-4.1-dev build-essential curl wget file \
             libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
-      # Atualiza a versão no tauri.conf.json a partir da tag (ex: v1.0.1 → 1.0.1)
       - name: Set version from tag
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          echo "Building version: $VERSION"
+          echo "Version: $VERSION"
           node -e "
             const fs = require('fs');
-            const conf = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json','utf8'));
-            conf.version = '$VERSION';
-            fs.writeFileSync('src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2));
+            const p = 'src-tauri/tauri.conf.json';
+            const c = JSON.parse(fs.readFileSync(p,'utf8'));
+            c.version = '$VERSION';
+            fs.writeFileSync(p, JSON.stringify(c, null, 2));
+            console.log('tauri.conf.json version set to', '$VERSION');
           "
 
       - name: Install npm dependencies
@@ -80,128 +86,58 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'Zabiss Editor ${{ github.ref_name }}'
+          releaseName: Zabiss Editor ${{ github.ref_name }}
           releaseBody: |
             ## Zabiss Editor ${{ github.ref_name }}
 
-            ### Instale o app
             | Sistema | Arquivo |
             |---------|---------|
             | Windows | `.msi` ou `-setup.exe` |
             | Linux   | `.deb` (Ubuntu) ou `.AppImage` |
             | macOS   | `.dmg` |
 
-            ---
-            Feito por [Neko Studio](mailto:nekostudio.contato@gmail.com)
+            Feito por Neko Studio — nekostudio.contato@gmail.com
           releaseDraft: false
           prerelease: false
 
-  # Job separado: gera o latest.json para o auto-updater após todos os builds
+  # Gera o latest.json para o auto-updater após todos os builds
   updater-json:
     needs: build
     runs-on: ubuntu-latest
-    name: Gerar latest.json
+    name: Publicar latest.json
+    if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Gerar e publicar latest.json
+      - name: Aguardar assets ficarem disponíveis
+        run: sleep 20
+
+      - name: Gerar latest.json
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          REPO="fernandopy26/Zabiss-Editor"
-          TAG="${GITHUB_REF_NAME}"
+          python3 scripts/generate-latest-json.py \
+            "$VERSION" \
+            "$GITHUB_REF_NAME" \
+            "$GITHUB_REPOSITORY" \
+            "$GITHUB_TOKEN"
 
-          # Aguarda assets ficarem disponíveis
-          sleep 30
-
-          # Busca assets da release
-          ASSETS=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
-            | python3 -c "
-import json,sys
-r=json.load(sys.stdin)
-assets = {a['name']: a['browser_download_url'] for a in r.get('assets',[])}
-print(json.dumps(assets))
-")
-
-          # Gera latest.json no formato Tauri v2
-          python3 << PYEOF
-import json, os, subprocess, base64
-
-version  = "$VERSION"
-tag      = "$TAG"
-repo     = "$REPO"
-token    = os.environ['GITHUB_TOKEN']
-assets   = json.loads('''$ASSETS''')
-
-def find_asset(keywords, exclude=None):
-    for name, url in assets.items():
-        if all(k in name for k in keywords):
-            if exclude and any(e in name for e in exclude):
-                continue
-            return url
-    return None
-
-def get_sig(url):
-    if not url: return None
-    sig_url = url + '.sig'
-    if sig_url.replace('.sig','') + '.sig' in [u for u in assets.values()]:
-        return sig_url
-    return None
-
-platforms = {}
-
-# Windows
-win_url = find_asset(['.msi'], ['.sig'])
-if win_url:
-    platforms['windows-x86_64'] = {
-        'url': win_url,
-        'signature': ''
-    }
-
-# Linux AppImage
-appimage_url = find_asset(['.AppImage'], ['.sig','.tar.gz'])
-if appimage_url:
-    platforms['linux-x86_64'] = {
-        'url': appimage_url,
-        'signature': ''
-    }
-
-# macOS
-mac_url = find_asset(['.dmg'], ['.sig'])
-if mac_url:
-    platforms['darwin-aarch64'] = {
-        'url': mac_url,
-        'signature': ''
-    }
-
-latest = {
-    'version': version,
-    'notes':   f'Zabiss Editor {tag} — veja os detalhes na página de releases.',
-    'pub_date': subprocess.check_output(['date','-u','+%Y-%m-%dT%H:%M:%SZ']).decode().strip(),
-    'platforms': platforms
-}
-
-with open('latest.json','w') as f:
-    json.dump(latest, f, indent=2)
-
-print('latest.json gerado:')
-print(json.dumps(latest, indent=2))
-PYEOF
-
-          # Faz upload do latest.json para a release
-          RELEASE_ID=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
+      - name: Upload latest.json para a release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_ID=$(curl -s \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
             | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
 
           curl -s -X POST \
             -H "Authorization: token $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
             --data-binary @latest.json \
-            "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=latest.json"
+            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=latest.json"
 
-          echo "latest.json publicado na release $TAG"
+          echo "latest.json publicado com sucesso"
