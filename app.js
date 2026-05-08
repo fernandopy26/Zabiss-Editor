@@ -1148,29 +1148,39 @@ function updateModeCards() {
 // ─── SELEÇÃO NATIVA DE ARQUIVO (TAURI) ───────────────────────
 async function selectMediaFileNative() {
   try {
+    // Filtra por tipo de mídia conforme o modo selecionado
+    const audioExts = ['mp3', 'wav', 'm4a', 'ogg', 'flac', 'aac', 'wma'];
+    const videoExts = ['mp4', 'mov', 'avi', 'webm', 'mkv', 'wmv', 'm4v', 'flv'];
+    const filters   = ST.inputType === 'audio'
+      ? [{ name: 'Áudio', extensions: audioExts }, { name: 'Todos', extensions: ['*'] }]
+      : [
+          { name: 'Vídeo e Áudio', extensions: [...videoExts, ...audioExts] },
+          { name: 'Todos', extensions: ['*'] },
+        ];
+
     const selected = await window.__TAURI__.dialog.open({
       multiple: false,
-      filters: [
-        { name: 'Vídeo', extensions: ['mp4', 'mov', 'avi', 'webm', 'mkv', 'wmv', 'm4v', 'flv'] },
-        { name: 'Áudio', extensions: ['mp3', 'wav', 'm4a', 'ogg', 'flac', 'aac', 'wma'] },
-        { name: 'Todos os arquivos', extensions: ['*'] },
-      ],
-      title: 'Selecione um vídeo ou áudio',
+      filters,
+      title: ST.inputType === 'audio' ? 'Selecione um áudio' : 'Selecione um vídeo ou áudio',
     });
     if (selected && typeof selected === 'string') {
       await loadMediaFromPath(selected);
     }
   } catch (err) {
-    showToast('Erro ao selecionar arquivo: ' + err, 'error');
+    showToast('Erro ao selecionar arquivo: ' + errMsg(err), 'error');
   }
 }
 
 async function loadMediaFromPath(filePath) {
   if (!filePath) return;
 
-  const ext      = filePath.replace(/\\/g, '/').split('/').pop().split('.').pop().toLowerCase();
-  const audioExts= new Set(['mp3', 'wav', 'm4a', 'ogg', 'flac', 'aac', 'wma']);
-  const isAudio  = audioExts.has(ext);
+  const ext       = filePath.replace(/\\/g, '/').split('/').pop().split('.').pop().toLowerCase();
+  const audioExts = new Set(['mp3', 'wav', 'm4a', 'ogg', 'flac', 'aac', 'wma']);
+  const fileIsAudio = audioExts.has(ext);
+
+  // Se o usuário escolheu o modo Áudio mas pegou um vídeo, mantém o modo Áudio
+  // (o áudio será extraído do vídeo). Só auto-troca se for o modo errado óbvio.
+  const isAudio = ST.inputType === 'audio' ? true : fileIsAudio;
 
   ST.inputPath = filePath;
   ST.inputExt  = ext;
@@ -1184,8 +1194,7 @@ async function loadMediaFromPath(filePath) {
     addLog('Aviso ao obter info do arquivo: ' + errMsg(e), 'warn');
   }
 
-  const detectedType = isAudio ? 'audio' : 'video';
-  if (ST.inputType !== detectedType) setInputType(detectedType);
+  // Não muda o tipo de input automaticamente — respeita o que o usuário escolheu
 
   // Atualiza UI da zona de upload (reusa handleMediaFile mas sem File object)
   const zone = $('upload-zone');
@@ -1442,22 +1451,44 @@ function escHtml(str) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ─── AUTO-UPDATER (Tauri) ────────────────────────────────────
+// ─── VERIFICAÇÃO DE NOVA VERSÃO ──────────────────────────────
 async function checkForUpdates(silent = false) {
   if (!IS_TAURI) return;
   try {
-    const update = await tauriInvoke('check_update');
-    if (!update) {
-      if (!silent) showToast('Você já está na versão mais recente.', 'success');
+    // Busca a última release do GitHub
+    const res = await fetch('https://api.github.com/repos/fernandopy26/Zabiss-Editor/releases/latest');
+    if (!res.ok) return;
+    const release = await res.json();
+    const latestVersion = (release.tag_name || '').replace(/^v/, '');
+
+    // Versão atual do app (vem do Cargo.toml via Rust)
+    const currentVersion = await tauriInvoke('get_app_version').catch(() => '0.0.0');
+
+    if (!latestVersion || latestVersion === currentVersion) {
+      if (!silent) showToast(`Você está na versão mais recente (v${currentVersion}).`, 'success');
       return;
     }
-    showUpdateBanner(update.version, update.notes);
+
+    if (compareVersions(latestVersion, currentVersion) > 0) {
+      showUpdateBanner(latestVersion, release.body || 'Nova versão disponível.', release.html_url);
+    }
   } catch (_) {
     // Falha silenciosa — pode estar offline
   }
 }
 
-function showUpdateBanner(version, notes) {
+function compareVersions(a, b) {
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const da = pa[i] || 0, db = pb[i] || 0;
+    if (da > db) return 1;
+    if (da < db) return -1;
+  }
+  return 0;
+}
+
+function showUpdateBanner(version, notes, releaseUrl) {
   const old = document.getElementById('update-banner');
   if (old) old.remove();
   const banner = document.createElement('div');
@@ -1465,37 +1496,39 @@ function showUpdateBanner(version, notes) {
   banner.style.cssText = [
     'position:fixed;bottom:80px;right:30px;z-index:998',
     'background:linear-gradient(135deg,#7c3aed,#06b6d4)',
-    'border-radius:16px;padding:16px 20px;max-width:320px',
+    'border-radius:16px;padding:16px 20px;max-width:340px',
     'box-shadow:0 8px 32px rgba(124,58,237,.5)',
     'animation:toastIn .3s ease',
   ].join(';');
+  // Trunca as notas para não ficar gigante
+  const shortNotes = (notes || 'Melhorias e correções.').slice(0, 200);
   banner.innerHTML = `
     <div style="font-weight:700;font-size:15px;color:#fff;margin-bottom:6px">
       🚀 Nova versão disponível: v${escHtml(version)}
     </div>
-    <div style="font-size:13px;color:rgba(255,255,255,.8);margin-bottom:14px;line-height:1.5">
-      ${escHtml(notes || 'Melhorias e correções disponíveis.')}
+    <div style="font-size:13px;color:rgba(255,255,255,.85);margin-bottom:14px;line-height:1.5;max-height:80px;overflow:hidden">
+      ${escHtml(shortNotes)}
     </div>
     <div style="display:flex;gap:8px">
-      <button id="btn-do-update" style="flex:1;padding:8px;background:#fff;color:#7c3aed;border:none;border-radius:50px;font-weight:700;font-size:13px;cursor:pointer">
-        ⬇ Instalar agora
+      <button id="btn-do-update" style="flex:1;padding:9px;background:#fff;color:#7c3aed;border:none;border-radius:50px;font-weight:700;font-size:13px;cursor:pointer">
+        🌐 Ver downloads
       </button>
-      <button onclick="document.getElementById('update-banner').remove()" style="padding:8px 14px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:50px;font-size:13px;cursor:pointer">
+      <button id="btn-update-later" style="padding:9px 14px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:50px;font-size:13px;cursor:pointer">
         Depois
       </button>
     </div>`;
   document.body.appendChild(banner);
-  document.getElementById('btn-do-update').addEventListener('click', async function() {
-    this.textContent = 'Baixando…';
-    this.disabled = true;
+
+  document.getElementById('btn-do-update').addEventListener('click', async () => {
     try {
-      await tauriInvoke('install_update');
+      await window.__TAURI__.shell.open(releaseUrl);
+      showToast('Página de download aberta no navegador.', 'success');
+      banner.remove();
     } catch (err) {
-      showToast('Erro ao atualizar: ' + err, 'error');
-      this.textContent = '⬇ Instalar agora';
-      this.disabled = false;
+      showToast('Erro ao abrir página: ' + errMsg(err), 'error');
     }
   });
+  document.getElementById('btn-update-later').addEventListener('click', () => banner.remove());
 }
 
 // ─── BOOT ────────────────────────────────────────

@@ -1,7 +1,6 @@
 use serde::Serialize;
 use std::path::Path;
 use tauri::Manager;
-use tauri_plugin_updater::UpdaterExt;
 
 // ── Estruturas ───────────────────────────────────────────────
 
@@ -13,7 +12,6 @@ struct FileInfo {
 
 // ── FFmpeg ───────────────────────────────────────────────────
 
-/// Localiza o FFmpeg: primeiro junto ao executável, depois no PATH do sistema
 fn find_ffmpeg(app: &tauri::AppHandle) -> String {
     if let Ok(res) = app.path().resource_dir() {
         let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
@@ -25,7 +23,6 @@ fn find_ffmpeg(app: &tauri::AppHandle) -> String {
     if cfg!(windows) { "ffmpeg.exe".into() } else { "ffmpeg".into() }
 }
 
-/// Executa FFmpeg com os argumentos dados pelo frontend
 #[tauri::command]
 async fn ffmpeg_exec(app: tauri::AppHandle, args: Vec<String>) -> Result<(), String> {
     let ffmpeg = find_ffmpeg(&app);
@@ -133,40 +130,11 @@ fn open_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
-// ── Auto-Updater ─────────────────────────────────────────────
+// ── Versão atual do app ──────────────────────────────────────
 
-#[derive(Serialize)]
-struct UpdateInfo {
-    version: String,
-    notes:   String,
-}
-
-/// Verifica se há uma versão nova disponível no GitHub Releases
 #[tauri::command]
-async fn check_update(app: tauri::AppHandle) -> Result<Option<UpdateInfo>, String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    match updater.check().await {
-        Ok(Some(u)) => Ok(Some(UpdateInfo {
-            version: u.version.clone(),
-            notes:   u.body.clone().unwrap_or_default(),
-        })),
-        Ok(None)    => Ok(None),
-        Err(e)      => Err(e.to_string()),
-    }
-}
-
-/// Baixa e instala a atualização, depois reinicia o app
-#[tauri::command]
-async fn install_update(app: tauri::AppHandle) -> Result<(), String> {
-    let updater = app.updater().map_err(|e| e.to_string())?;
-    if let Some(update) = updater.check().await.map_err(|e| e.to_string())? {
-        update
-            .download_and_install(|_, _| {}, || {})
-            .await
-            .map_err(|e| e.to_string())?;
-        app.restart();
-    }
-    Ok(())
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 // ── Entry Point ──────────────────────────────────────────────
@@ -176,8 +144,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             ffmpeg_exec,
             get_temp_path,
@@ -188,8 +154,7 @@ pub fn run() {
             delete_file,
             copy_file,
             open_folder,
-            check_update,
-            install_update,
+            get_app_version,
         ])
         .run(tauri::generate_context!())
         .expect("Erro ao iniciar Zabiss Editor");

@@ -5,10 +5,6 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag para buildar (ex: v1.0.1)'
-        required: true
 
 permissions:
   contents: write
@@ -68,6 +64,9 @@ jobs:
             fs.writeFileSync(p, JSON.stringify(c, null, 2));
             console.log('tauri.conf.json version set to', '$VERSION');
           "
+          # Atualiza Cargo.toml também (para o get_app_version retornar a versão correta)
+          sed -i.bak "s/^version *= *\".*\"/version = \"$VERSION\"/" src-tauri/Cargo.toml
+          rm -f src-tauri/Cargo.toml.bak
 
       - name: Install npm dependencies
         run: npm install
@@ -82,8 +81,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Zabiss Editor ${{ github.ref_name }}
@@ -99,45 +96,3 @@ jobs:
             Feito por Neko Studio — nekostudio.contato@gmail.com
           releaseDraft: false
           prerelease: false
-
-  # Gera o latest.json para o auto-updater após todos os builds
-  updater-json:
-    needs: build
-    runs-on: ubuntu-latest
-    name: Publicar latest.json
-    if: startsWith(github.ref, 'refs/tags/v')
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Aguardar assets ficarem disponíveis
-        run: sleep 20
-
-      - name: Gerar latest.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          python3 scripts/generate-latest-json.py \
-            "$VERSION" \
-            "$GITHUB_REF_NAME" \
-            "$GITHUB_REPOSITORY" \
-            "$GITHUB_TOKEN"
-
-      - name: Upload latest.json para a release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          RELEASE_ID=$(curl -s \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
-            | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
-
-          curl -s -X POST \
-            -H "Authorization: token $GITHUB_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data-binary @latest.json \
-            "https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID/assets?name=latest.json"
-
-          echo "latest.json publicado com sucesso"
