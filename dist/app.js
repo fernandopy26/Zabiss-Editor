@@ -1403,4 +1403,64 @@ function escHtml(str) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-document.addEventListener('DOMContentLoaded', init);
+// ─── AUTO-UPDATER (Tauri) ────────────────────────────────────
+async function checkForUpdates(silent = false) {
+  if (!IS_TAURI) return;
+  try {
+    const update = await tauriInvoke('check_update');
+    if (!update) {
+      if (!silent) showToast('Você já está na versão mais recente.', 'success');
+      return;
+    }
+    showUpdateBanner(update.version, update.notes);
+  } catch (_) {
+    // Falha silenciosa — pode estar offline
+  }
+}
+
+function showUpdateBanner(version, notes) {
+  const old = document.getElementById('update-banner');
+  if (old) old.remove();
+  const banner = document.createElement('div');
+  banner.id = 'update-banner';
+  banner.style.cssText = [
+    'position:fixed;bottom:80px;right:30px;z-index:998',
+    'background:linear-gradient(135deg,#7c3aed,#06b6d4)',
+    'border-radius:16px;padding:16px 20px;max-width:320px',
+    'box-shadow:0 8px 32px rgba(124,58,237,.5)',
+    'animation:toastIn .3s ease',
+  ].join(';');
+  banner.innerHTML = `
+    <div style="font-weight:700;font-size:15px;color:#fff;margin-bottom:6px">
+      🚀 Nova versão disponível: v${escHtml(version)}
+    </div>
+    <div style="font-size:13px;color:rgba(255,255,255,.8);margin-bottom:14px;line-height:1.5">
+      ${escHtml(notes || 'Melhorias e correções disponíveis.')}
+    </div>
+    <div style="display:flex;gap:8px">
+      <button id="btn-do-update" style="flex:1;padding:8px;background:#fff;color:#7c3aed;border:none;border-radius:50px;font-weight:700;font-size:13px;cursor:pointer">
+        ⬇ Instalar agora
+      </button>
+      <button onclick="document.getElementById('update-banner').remove()" style="padding:8px 14px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:50px;font-size:13px;cursor:pointer">
+        Depois
+      </button>
+    </div>`;
+  document.body.appendChild(banner);
+  document.getElementById('btn-do-update').addEventListener('click', async function() {
+    this.textContent = 'Baixando…';
+    this.disabled = true;
+    try {
+      await tauriInvoke('install_update');
+    } catch (err) {
+      showToast('Erro ao atualizar: ' + err, 'error');
+      this.textContent = '⬇ Instalar agora';
+      this.disabled = false;
+    }
+  });
+}
+
+// ─── BOOT ────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  init();
+  if (IS_TAURI) setTimeout(() => checkForUpdates(true), 3000);
+});
