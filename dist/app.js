@@ -299,6 +299,26 @@ async function extractAudioSegment(start, end, idx) {
   return new Blob([data.buffer], { type: 'audio/wav' });
 }
 
+// Extrai o áudio INTEIRO do arquivo como MP3 mono comprimido para Whisper.
+// 48kbps mono caem ~70min num arquivo de 25MB (limite do Groq Whisper).
+async function extractFullAudio() {
+  const audioArgs = ['-vn', '-c:a', 'libmp3lame', '-b:a', '48k', '-ac', '1', '-ar', '16000'];
+
+  if (IS_TAURI) {
+    const outPath = await tauriTempPath('full_audio.mp3');
+    await ffmpegRun('-i', ST.inputPath, ...audioArgs, '-y', outPath);
+    const bytes = await tauriInvoke('read_file_bytes', { path: outPath });
+    await tauriInvoke('delete_file', { path: outPath });
+    return new Blob([new Uint8Array(bytes)], { type: 'audio/mpeg' });
+  }
+
+  const outName = 'full_audio.mp3';
+  await ffmpegRun('-i', `input.${ST.inputExt}`, ...audioArgs, outName);
+  const data = ffmpegInst.FS('readFile', outName);
+  ffmpegInst.FS('unlink', outName);
+  return new Blob([data.buffer], { type: 'audio/mpeg' });
+}
+
 async function extractFrameAtTime(file, timeSec) {
   // Tauri: usa FFmpeg via Rust para extrair o frame como JPEG base64
   if (IS_TAURI) {
@@ -379,6 +399,61 @@ async function groqFetch(fetchFn, label, maxRetries = 8) {
     throw new Error(`${label} (${res.status}): ${body}`);
   }
   throw new Error(`${label}: limite de tentativas atingido após ${maxRetries} tentativas.`);
+}
+
+// Limite do Groq Whisper: 25MB por arquivo
+const WHISPER_MAX_BYTES = 24 * 1024 * 1024; // 24MB margem de segurança
+
+// Envia o áudio inteiro para Whisper e retorna { segments: [{start, end, text}], text }
+async function groqTranscribeFull(audioBlob) {
+  const fd = new FormData();
+  fd.append('file', audioBlob, 'audio.mp3');
+  fd.append('model', CFG.GROQ_WHISPER);
+  fd.append('response_format', 'verbose_json');
+  fd.append('timestamp_granularities[]', 'segment');
+  if (ST.lang !== 'auto') fd.append('language', ST.lang);
+
+  const res = await groqFetch(() => fetch(`${CFG.GROQ_BASE}/audio/transcriptions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${ST.apiKey}` },
+    body: fd,
+  }), 'Groq Whisper');
+  return await res.json();
+}
+
+// Distribui o texto transcrito pelas partes do usuário usando os timestamps
+function splitTranscriptionByTime(whisperResult, userSegs) {
+  const wsegs = whisperResult.segments || [];
+  const buckets = userSegs.map(s => ({ idx: s.idx, start: s.start, end: s.end, parts: [] }));
+
+  for (const ws of wsegs) {
+    // Pelo ponto médio do segmento Whisper, decide em qual parte do usuário ele cai
+    const mid = ((ws.start ?? 0) + (ws.end ?? 0)) / 2;
+    const bucket = buckets.find(b => mid >= b.start && mid < b.end) || buckets[buckets.length - 1];
+    if (bucket && ws.text) bucket.parts.push(ws.text.trim());
+  }
+
+  return buckets.map(b => b.parts.join(' ').trim());
+}
+
+// Caminho rápido: extrai áudio inteiro, manda 1x para Whisper, divide pelos timestamps
+// Retorna array de { idx, text } na mesma ordem dos segs
+async function transcribeAllFast(segs) {
+  setProgress(8, 'Extraindo áudio do arquivo…');
+  const audio = await extractFullAudio();
+  addLog(`Áudio extraído: ${fmtSize(audio.size)}`, 'info');
+
+  if (audio.size > WHISPER_MAX_BYTES) {
+    addLog(`Arquivo muito grande para envio único (${fmtSize(audio.size)}) — usando modo lento por segmento.`, 'warn');
+    return null; // sinaliza fallback
+  }
+
+  setProgress(20, 'Enviando para Groq Whisper (1 chamada)…');
+  const result = await groqTranscribeFull(audio);
+  setProgress(75, 'Distribuindo texto pelas partes…');
+
+  const texts = splitTranscriptionByTime(result, segs);
+  return segs.map((s, i) => ({ idx: s.idx, text: texts[i] || '[sem fala]' }));
 }
 
 async function groqTranscribe(audioBlob) {
@@ -522,23 +597,50 @@ async function runCutMode(segs) {
 
 async function runTranscribeMode(segs) {
   requireApiKey();
-  addLog(`Transcrevendo áudio em ${segs.length} partes…`, 'info');
   await writeInputToFFmpeg(ST.mediaFile);
 
+  // Caminho rápido: 1 chamada para todo o áudio + divisão por timestamps
+  addLog(`Transcrevendo ${segs.length} partes (modo rápido — 1 chamada Whisper)…`, 'info');
+  let results = null;
+  try {
+    results = await transcribeAllFast(segs);
+  } catch (err) {
+    addLog('Modo rápido falhou: ' + errMsg(err) + ' — usando modo lento.', 'warn');
+  }
+
+  if (results) {
+    setProgress(90, 'Salvando arquivos…');
+    for (let i = 0; i < segs.length; i++) {
+      const r = results[i];
+      const txt = r.text || '[Nenhuma fala detectada]';
+      setSegActive(r.idx);
+      ST.outputFiles.push({
+        name: `Parte ${r.idx}.txt`,
+        blob: new Blob([txt], { type: 'text/plain;charset=utf-8' }),
+        type: 'text',
+      });
+      ST.doneSegs++;
+      setSegDone(r.idx);
+      addLog(`  ✓ Parte ${r.idx}.txt — "${txt.slice(0, 55)}…"`, 'success');
+    }
+    unlinkInput();
+    return;
+  }
+
+  // Fallback: método antigo (1 chamada por segmento)
+  addLog(`Modo lento: ${segs.length} chamadas separadas…`, 'info');
   for (let i = 0; i < segs.length; i++) {
     const seg = segs[i];
     setSegActive(seg.idx);
     setProgress((i / segs.length) * 97, `Parte ${seg.idx}/${segs.length}…`);
-    addLog(`↳ Parte ${seg.idx}: extraindo áudio…`, 'info');
     const audioBlob = await extractAudioSegment(seg.start, seg.end, seg.idx);
-    addLog(`  Enviando para Groq Whisper…`, 'info');
     const text    = await groqTranscribe(audioBlob);
     const content = text || '[Nenhuma fala detectada]';
     ST.outputFiles.push({ name: `Parte ${seg.idx}.txt`, blob: new Blob([content], { type: 'text/plain;charset=utf-8' }), type: 'text' });
     ST.doneSegs++;
     setSegDone(seg.idx);
     addLog(`  ✓ Parte ${seg.idx}.txt — "${content.slice(0, 55)}…"`, 'success');
-    if (i < segs.length - 1) await sleep(800);
+    if (i < segs.length - 1) await sleep(3500);
   }
   unlinkInput();
 }
@@ -594,19 +696,30 @@ async function runAudioPromptsMode(segs) {
   addLog(`Prompts de áudio (${modeLabel}) — Whisper + Llama…`, 'info');
   await writeInputToFFmpeg(ST.mediaFile);
 
-  // Fase 1 — transcrever todos os segmentos
-  addLog(`Transcrevendo ${total} segmentos…`, 'info');
-  const transcriptions = [];
-  for (let i = 0; i < total; i++) {
-    const seg = segs[i];
-    setSegActive(seg.idx);
-    setProgress((i / total) * 52, `Transcrevendo Parte ${i + 1}/${total}…`);
-    const audioBlob = await extractAudioSegment(seg.start, seg.end, seg.idx);
-    const text      = await groqTranscribe(audioBlob);
-    transcriptions.push({ idx: seg.idx, text: text || '[sem fala]' });
-    setSegDone(seg.idx);
-    addLog(`  ✓ Transcrito: "${(text || '').slice(0, 50)}…"`, 'info');
-    if (i < total - 1) await sleep(3500); // Groq Whisper free: ~20 req/min → 1 a cada 3s
+  // Fase 1 — transcrever (modo rápido: 1 chamada para tudo, com fallback)
+  let transcriptions = null;
+  try {
+    addLog(`Transcrevendo ${total} partes (modo rápido — 1 chamada)…`, 'info');
+    transcriptions = await transcribeAllFast(segs);
+  } catch (err) {
+    addLog('Modo rápido falhou: ' + errMsg(err) + ' — usando modo lento.', 'warn');
+  }
+
+  if (!transcriptions) {
+    transcriptions = [];
+    addLog(`Modo lento: ${total} chamadas Whisper…`, 'info');
+    for (let i = 0; i < total; i++) {
+      const seg = segs[i];
+      setSegActive(seg.idx);
+      setProgress((i / total) * 52, `Transcrevendo ${i + 1}/${total}…`);
+      const audioBlob = await extractAudioSegment(seg.start, seg.end, seg.idx);
+      const text      = await groqTranscribe(audioBlob);
+      transcriptions.push({ idx: seg.idx, text: text || '[sem fala]' });
+      setSegDone(seg.idx);
+      if (i < total - 1) await sleep(3500);
+    }
+  } else {
+    transcriptions.forEach(t => setSegDone(t.idx));
   }
   unlinkInput();
 
@@ -712,19 +825,30 @@ async function runAudioCombinedMode(segs) {
     addLog(`✓ Parte ${seg.idx}.mp3 (${fmtSize(blob.size)})`, 'success');
   }
 
-  // Fase 2 — transcrever
+  // Fase 2 — transcrever (modo rápido: 1 chamada para tudo)
   renderSegDots(total);
-  addLog(`Transcrevendo ${total} segmentos…`, 'info');
-  const transcriptions = [];
-  for (let i = 0; i < total; i++) {
-    const seg = segs[i];
-    setSegActive(seg.idx);
-    setProgress(37 + (i / total) * 30, `Transcrevendo ${i + 1}/${total}…`);
-    const audioBlob = await extractAudioSegment(seg.start, seg.end, seg.idx);
-    const text      = await groqTranscribe(audioBlob);
-    transcriptions.push({ idx: seg.idx, text: text || '[sem fala]' });
-    setSegDone(seg.idx);
-    if (i < total - 1) await sleep(3500); // Groq Whisper free: ~20 req/min → 1 a cada 3s
+  let transcriptions = null;
+  try {
+    addLog(`Transcrevendo ${total} partes (modo rápido — 1 chamada)…`, 'info');
+    transcriptions = await transcribeAllFast(segs);
+    transcriptions.forEach(t => setSegDone(t.idx));
+  } catch (err) {
+    addLog('Modo rápido falhou: ' + errMsg(err) + ' — usando modo lento.', 'warn');
+  }
+
+  if (!transcriptions) {
+    transcriptions = [];
+    addLog(`Modo lento: ${total} chamadas Whisper…`, 'info');
+    for (let i = 0; i < total; i++) {
+      const seg = segs[i];
+      setSegActive(seg.idx);
+      setProgress(37 + (i / total) * 30, `Transcrevendo ${i + 1}/${total}…`);
+      const audioBlob = await extractAudioSegment(seg.start, seg.end, seg.idx);
+      const text      = await groqTranscribe(audioBlob);
+      transcriptions.push({ idx: seg.idx, text: text || '[sem fala]' });
+      setSegDone(seg.idx);
+      if (i < total - 1) await sleep(3500);
+    }
   }
   unlinkInput();
 
