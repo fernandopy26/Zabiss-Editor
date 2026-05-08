@@ -14,14 +14,21 @@ struct FileInfo {
 // ── FFmpeg ───────────────────────────────────────────────────
 
 fn find_ffmpeg(app: &tauri::AppHandle) -> String {
+    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
     if let Ok(res) = app.path().resource_dir() {
-        let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-        let p = res.join(name);
-        if p.exists() {
-            return p.to_string_lossy().to_string();
+        // 1. Empacotado como resource em binaries/ffmpeg
+        let bundled = res.join("binaries").join(name);
+        if bundled.exists() {
+            return bundled.to_string_lossy().to_string();
+        }
+        // 2. Direto na pasta de resources
+        let direct = res.join(name);
+        if direct.exists() {
+            return direct.to_string_lossy().to_string();
         }
     }
-    if cfg!(windows) { "ffmpeg.exe".into() } else { "ffmpeg".into() }
+    // 3. Fallback: FFmpeg do PATH do sistema (modo dev)
+    name.to_string()
 }
 
 #[tauri::command]

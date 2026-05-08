@@ -51,6 +51,39 @@ jobs:
             libwebkit2gtk-4.1-dev build-essential curl wget file \
             libssl-dev libayatana-appindicator3-dev librsvg2-dev
 
+      # Baixa FFmpeg estático para empacotar dentro do app (cliente não precisa instalar)
+      - name: Download FFmpeg (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri/binaries | Out-Null
+          $url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
+          Invoke-WebRequest -Uri $url -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg-extracted -Force
+          $exe = Get-ChildItem -Path ffmpeg-extracted -Filter ffmpeg.exe -Recurse | Select-Object -First 1
+          Move-Item -Path $exe.FullName -Destination "src-tauri/binaries/ffmpeg.exe" -Force
+          Write-Host "FFmpeg baixado: $((Get-Item src-tauri/binaries/ffmpeg.exe).Length / 1MB) MB"
+
+      - name: Download FFmpeg (Linux)
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          mkdir -p src-tauri/binaries
+          curl -L -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
+          tar -xf ffmpeg.tar.xz
+          mv ffmpeg-*-amd64-static/ffmpeg src-tauri/binaries/
+          chmod +x src-tauri/binaries/ffmpeg
+          ls -lh src-tauri/binaries/ffmpeg
+
+      - name: Download FFmpeg (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir -p src-tauri/binaries
+          curl -L -o ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip"
+          unzip -o ffmpeg.zip
+          mv ffmpeg src-tauri/binaries/
+          chmod +x src-tauri/binaries/ffmpeg
+          ls -lh src-tauri/binaries/ffmpeg
+
       - name: Set version from tag
         shell: bash
         run: |
