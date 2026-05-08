@@ -4,6 +4,16 @@
 
 'use strict';
 
+// ─── HELPERS ─────────────────────────────────────
+// Extrai mensagem legível de qualquer tipo de erro (Error, string, Event, etc.)
+function errMsg(e) {
+  if (!e) return 'Erro desconhecido';
+  if (typeof e === 'string') return e;
+  if (e.message) return e.message;
+  if (e.toString && e.toString() !== '[object Object]') return e.toString();
+  return JSON.stringify(e);
+}
+
 // ─── TAURI DETECTION ─────────────────────────────
 // true quando rodando como app desktop (Tauri)
 // false quando rodando no navegador (usa FFmpeg.wasm como fallback)
@@ -165,7 +175,7 @@ async function loadFFmpeg() {
     addLog('FFmpeg.wasm carregado ✓', 'success');
   } catch (err) {
     loader.classList.add('hidden');
-    showToast('Falha ao carregar FFmpeg: ' + err.message, 'error');
+    showToast('Falha ao carregar FFmpeg: ' + errMsg(err), 'error');
     console.error(err);
   }
 }
@@ -193,8 +203,10 @@ async function getMediaDuration(file) {
       if (!IS_TAURI) URL.revokeObjectURL(el.src);
       resolve(el.duration);
     };
-    el.onerror = reject;
-    el.src = IS_TAURI ? tauriSrc(ST.inputPath) : URL.createObjectURL(file);
+    el.onerror = () => reject(new Error('Não foi possível ler o arquivo de mídia. Verifique se o formato é suportado.'));
+    const src = IS_TAURI ? tauriSrc(ST.inputPath) : URL.createObjectURL(file);
+    if (!src) return reject(new Error('Caminho do arquivo inválido.'));
+    el.src = src;
   });
 }
 
@@ -305,7 +317,9 @@ async function extractFrameAtTime(file, timeSec) {
       if (!IS_TAURI) URL.revokeObjectURL(video.src);
       resolve(canvas.toDataURL('image/jpeg', 0.82).split(',')[1]);
     };
-    video.onerror = reject;
+    video.onerror = () => {
+      if (!resolved) { resolved = true; reject(new Error('Erro ao carregar frame do vídeo.')); }
+    };
     setTimeout(() => {
       if (!resolved) {
         resolved = true;
@@ -313,7 +327,9 @@ async function extractFrameAtTime(file, timeSec) {
         reject(new Error('Frame extraction timeout'));
       }
     }, 12000);
-    video.src = IS_TAURI ? tauriSrc(ST.inputPath) : URL.createObjectURL(file);
+    const src = IS_TAURI ? tauriSrc(ST.inputPath) : URL.createObjectURL(file);
+    if (!src) return reject(new Error('Caminho do arquivo inválido.'));
+    video.src = src;
   });
 }
 
@@ -817,8 +833,8 @@ async function processMedia() {
     showToast('Processamento concluído!', 'success');
   } catch (err) {
     console.error(err);
-    addLog('ERRO: ' + err.message, 'error');
-    showToast('Erro: ' + err.message, 'error');
+    addLog('ERRO: ' + errMsg(err), 'error');
+    showToast('Erro: ' + errMsg(err), 'error');
   } finally {
     processBtn.classList.remove('loading');
     processBtn.disabled = false;
@@ -875,8 +891,8 @@ async function runConverter() {
     convLog(`✓ Convertido: ${outFile} (${fmtSize(blob.size)})`);
     showToast(`Áudio baixado: ${outFile}`, 'success');
   } catch (err) {
-    convLog('ERRO: ' + err.message);
-    showToast('Erro na conversão: ' + err.message, 'error');
+    convLog('ERRO: ' + errMsg(err));
+    showToast('Erro na conversão: ' + errMsg(err), 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = '🎵 Converter e Baixar';
@@ -924,7 +940,7 @@ async function saveToFolder() {
     }
     showToast('Todos os arquivos salvos!', 'success');
   } catch (err) {
-    if (err.name !== 'AbortError') showToast('Erro ao salvar: ' + err.message, 'error');
+    if (err?.name !== 'AbortError') showToast('Erro ao salvar: ' + errMsg(err), 'error');
   }
 }
 
@@ -1150,15 +1166,23 @@ async function selectMediaFileNative() {
 }
 
 async function loadMediaFromPath(filePath) {
+  if (!filePath) return;
+
   const ext      = filePath.replace(/\\/g, '/').split('/').pop().split('.').pop().toLowerCase();
   const audioExts= new Set(['mp3', 'wav', 'm4a', 'ogg', 'flac', 'aac', 'wma']);
   const isAudio  = audioExts.has(ext);
-  const info     = await tauriInvoke('get_file_info', { path: filePath });
 
   ST.inputPath = filePath;
   ST.inputExt  = ext;
-  ST.inputSize = Number(info.size);
   ST.mediaFile = null;
+
+  let info = { name: filePath.replace(/\\/g, '/').split('/').pop(), size: 0 };
+  try {
+    info = await tauriInvoke('get_file_info', { path: filePath });
+    ST.inputSize = Number(info.size);
+  } catch (e) {
+    addLog('Aviso ao obter info do arquivo: ' + errMsg(e), 'warn');
+  }
 
   const detectedType = isAudio ? 'audio' : 'video';
   if (ST.inputType !== detectedType) setInputType(detectedType);
@@ -1205,6 +1229,21 @@ async function loadMediaFromPath(filePath) {
 
 // ─── INIT ─────────────────────────────────────────
 function init() {
+  // Links externos: no Tauri abre no navegador padrão do sistema
+  if (IS_TAURI) {
+    document.addEventListener('click', e => {
+      const link = e.target.closest('a[href]');
+      if (!link) return;
+      const href = link.getAttribute('href');
+      if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+        e.preventDefault();
+        window.__TAURI__.shell.open(href).catch(err => {
+          addLog('Erro ao abrir link: ' + errMsg(err), 'warn');
+        });
+      }
+    });
+  }
+
   // API key
   $('api-key-input').value = ST.apiKey;
   $('api-key-input').addEventListener('input', e => {
