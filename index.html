@@ -357,6 +357,21 @@
     <!-- STEP 6: Results -->
     <div class="section results-section" id="results-section">
       <div class="section-label">Resultado</div>
+
+      <!-- Painel de conteúdo gerado (transcrições/prompts) com copy individual -->
+      <div class="prompts-panel" id="prompts-panel" style="display:none">
+        <div class="prompts-panel-header">
+          <div>
+            <div class="prompts-panel-title" id="prompts-panel-title">Conteúdo gerado</div>
+            <div class="prompts-panel-sub">Copie cada parte ou tudo de uma vez</div>
+          </div>
+          <button class="btn-copy-all" id="btn-copy-all" type="button">
+            <span>📋</span><span>Copiar tudo</span>
+          </button>
+        </div>
+        <div class="prompts-list" id="prompts-list"></div>
+      </div>
+
       <div class="results-card">
         <div class="results-summary">
           <div class="results-icon">🎉</div>

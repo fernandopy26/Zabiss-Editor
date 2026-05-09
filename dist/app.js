@@ -14,6 +14,25 @@ function errMsg(e) {
   return JSON.stringify(e);
 }
 
+// Copia texto para o clipboard com fallback (funciona em browser, Tauri e WebKit antigos)
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) {
+    // Fallback: textarea + execCommand
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+    return ok;
+  }
+}
+
 // ─── TAURI DETECTION ─────────────────────────────
 // true quando rodando como app desktop (Tauri)
 // false quando rodando no navegador (usa FFmpeg.wasm como fallback)
@@ -1109,6 +1128,82 @@ function addLog(msg, type = 'info') {
   el.scrollTop = el.scrollHeight;
 }
 
+async function populatePromptsPanel() {
+  const panel = $('prompts-panel');
+  const list  = $('prompts-list');
+  const title = $('prompts-panel-title');
+
+  // Pega todos os arquivos de texto (transcrição, prompts, etc.)
+  const textFiles = ST.outputFiles.filter(f => f.type === 'text');
+  if (!textFiles.length) {
+    panel.style.display = 'none';
+    return;
+  }
+
+  // Define título conforme o modo
+  if (ST.mode === 'transcribe') title.textContent = 'Transcrições por parte';
+  else if (ST.mode === 'prompts' || ST.mode === 'combined') title.textContent = 'Prompts gerados';
+  else title.textContent = 'Conteúdo gerado';
+
+  // Lê o conteúdo de todos os blobs de texto
+  const items = await Promise.all(textFiles.map(async f => ({
+    name: f.name.replace(/\.txt$/, ''),
+    text: await f.blob.text(),
+  })));
+
+  list.innerHTML = '';
+  for (const item of items) {
+    const card = document.createElement('div');
+    card.className = 'prompt-card';
+    card.innerHTML = `
+      <div class="prompt-card-header">
+        <span class="prompt-card-num">${escHtml(item.name)}</span>
+        <button class="btn-copy" type="button">
+          <span>📋</span><span class="copy-label">Copiar</span>
+        </button>
+      </div>
+      <div class="prompt-card-text">${escHtml(item.text)}</div>
+    `;
+
+    const btn = card.querySelector('.btn-copy');
+    const lbl = card.querySelector('.copy-label');
+    btn.addEventListener('click', async () => {
+      const ok = await copyToClipboard(item.text);
+      if (ok) {
+        btn.classList.add('copied');
+        lbl.textContent = 'Copiado!';
+        setTimeout(() => { btn.classList.remove('copied'); lbl.textContent = 'Copiar'; }, 1500);
+      } else {
+        showToast('Falha ao copiar — selecione e copie manualmente.', 'error');
+      }
+    });
+
+    list.appendChild(card);
+  }
+
+  // Botão "Copiar tudo": junta com cabeçalhos de parte
+  const allText = items.map(i => `[${i.name}]\n${i.text}`).join('\n\n');
+  const btnAll = $('btn-copy-all');
+  // Remove listener anterior clonando
+  const newBtn = btnAll.cloneNode(true);
+  btnAll.parentNode.replaceChild(newBtn, btnAll);
+  newBtn.addEventListener('click', async () => {
+    const ok = await copyToClipboard(allText);
+    if (ok) {
+      newBtn.classList.add('copied');
+      newBtn.innerHTML = '<span>✓</span><span>Tudo copiado!</span>';
+      setTimeout(() => {
+        newBtn.classList.remove('copied');
+        newBtn.innerHTML = '<span>📋</span><span>Copiar tudo</span>';
+      }, 2000);
+    } else {
+      showToast('Falha ao copiar tudo.', 'error');
+    }
+  });
+
+  panel.style.display = 'block';
+}
+
 function showResults() {
   const section  = $('results-section');
   const fileList = $('file-list');
@@ -1146,6 +1241,9 @@ function showResults() {
   $('results-stats').innerHTML = stats.join('');
   $('results-title').textContent = `${ST.outputFiles.length} arquivo${ST.outputFiles.length !== 1 ? 's' : ''} gerado${ST.outputFiles.length !== 1 ? 's' : ''}`;
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  // Popula painel de textos com botões de copiar (async, não bloqueia)
+  populatePromptsPanel().catch(e => console.error('Erro ao popular painel:', e));
 }
 
 function showToast(msg, type = 'info') {
@@ -1560,6 +1658,8 @@ function resetAll() {
   $('log-console').innerHTML = '';
   $('progress-bar-fill').style.width = '0%';
   $('progress-segments').innerHTML = '';
+  $('prompts-panel').style.display = 'none';
+  $('prompts-list').innerHTML = '';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
