@@ -375,13 +375,99 @@
         <div class="prompts-panel-header">
           <div>
             <div class="prompts-panel-title" id="prompts-panel-title">Conteúdo gerado</div>
-            <div class="prompts-panel-sub">Copie cada parte ou tudo de uma vez</div>
+            <div class="prompts-panel-sub">Copie cada parte ou gere imagens</div>
           </div>
-          <button class="btn-copy-all" id="btn-copy-all" type="button">
-            <span>📋</span><span>Copiar tudo</span>
-          </button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-copy-all" id="btn-copy-all" type="button">
+              <span>📋</span><span>Copiar tudo</span>
+            </button>
+            <button class="btn-gen-images" id="btn-gen-images" type="button" style="display:none">
+              <span>🎨</span><span>Gerar imagens</span>
+            </button>
+          </div>
         </div>
         <div class="prompts-list" id="prompts-list"></div>
+      </div>
+
+      <!-- Painel de configurações da geração de imagens -->
+      <div class="image-config-panel" id="image-config-panel" style="display:none">
+        <div class="image-config-header">
+          <span>🎨</span>
+          <span style="font-weight:600">Configurações da geração</span>
+          <button class="image-config-close" id="image-config-close" type="button" title="Fechar">✕</button>
+        </div>
+        <div class="image-config-body">
+          <div class="settings-grid">
+            <div class="form-group">
+              <label for="img-aspect">Formato</label>
+              <select id="img-aspect">
+                <option value="1280x720">16:9 — YouTube (1280×720)</option>
+                <option value="1920x1080">16:9 — Full HD (1920×1080)</option>
+                <option value="1024x1024">1:1 — Quadrado (1024×1024)</option>
+                <option value="720x1280">9:16 — Shorts/Reels (720×1280)</option>
+                <option value="1080x1920">9:16 — Vertical HD (1080×1920)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="img-model">Modelo</label>
+              <select id="img-model">
+                <option value="flux">Flux — qualidade alta (mais lento)</option>
+                <option value="turbo">Turbo — rápido</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group full-width" style="margin-top:12px">
+            <label class="checkbox-label">
+              <input type="checkbox" id="img-translate" checked />
+              <span class="checkbox-mark"></span>
+              <span class="checkbox-text">
+                Traduzir prompts para inglês antes (recomendado)
+                <span class="checkbox-hint">Modelos de imagem entendem inglês muito melhor — geralmente o resultado fica notavelmente melhor.</span>
+              </span>
+            </label>
+          </div>
+          <div class="form-group full-width" style="margin-top:12px">
+            <label for="img-style">Estilo base (opcional)</label>
+            <div class="textarea-wrap">
+              <textarea id="img-style" rows="2" maxlength="500"
+                placeholder="Ex: cinematic photography, dramatic lighting, hyper realistic, 4k"></textarea>
+            </div>
+            <div class="form-hint">Será adicionado a cada prompt — use para manter um estilo visual consistente.</div>
+          </div>
+          <div class="form-group full-width" style="margin-top:12px">
+            <label for="img-character">Personagem fixo (opcional)</label>
+            <div class="textarea-wrap">
+              <textarea id="img-character" rows="2" maxlength="500"
+                placeholder="Ex: a young blonde boy, 10 years old, wearing blue shirt and jeans"></textarea>
+            </div>
+            <div class="form-hint">Descrição do protagonista para tentar manter consistência entre cenas.</div>
+          </div>
+          <div style="margin-top:16px;display:flex;gap:10px;justify-content:flex-end">
+            <button class="btn-secondary" id="btn-cancel-img-gen" type="button" style="flex:0">Cancelar</button>
+            <button class="btn-primary" id="btn-start-img-gen" type="button" style="flex:0">
+              ✨ Iniciar geração
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Painel das imagens geradas -->
+      <div class="images-panel" id="images-panel" style="display:none">
+        <div class="images-panel-header">
+          <div>
+            <div class="prompts-panel-title">🖼️ Imagens geradas</div>
+            <div class="prompts-panel-sub" id="images-panel-sub">Pronto para baixar</div>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-secondary" id="btn-retry-failed" type="button" style="display:none">
+              🔄 Tentar falhas
+            </button>
+            <button class="btn-copy-all" id="btn-download-all-images" type="button">
+              <span>📦</span><span>Baixar todas (ZIP)</span>
+            </button>
+          </div>
+        </div>
+        <div class="images-grid" id="images-grid"></div>
       </div>
 
       <div class="results-card" id="results-card-wrap">

@@ -98,8 +98,9 @@ let ST = {
   promptLevel:    3,
   customPrompt:   '',
   saveTxtFiles:   false, // checkbox: salvar prompts/combined como .txt além do painel
-  outputFiles:    [],    // arquivos para baixar (zip/pasta)
-  generatedTexts: [],    // [{idx, name, text}] para exibir no painel (independente de salvar)
+  outputFiles:     [],   // arquivos para baixar (zip/pasta)
+  generatedTexts:  [],   // [{idx, name, text}] para exibir no painel (independente de salvar)
+  generatedImages: [],   // [{idx, name, blob, ok}] imagens geradas via Pollinations
   totalSegs:      0,
   doneSegs:       0,
 };
@@ -929,9 +930,13 @@ async function processMedia() {
   const needsApi = ST.mode !== 'cut';
   if (needsApi && !ST.apiKey) return showToast('Insira sua chave de API Groq nas configurações.', 'error');
 
-  ST.outputFiles    = [];
-  ST.generatedTexts = [];
-  ST.doneSegs       = 0;
+  ST.outputFiles     = [];
+  ST.generatedTexts  = [];
+  ST.generatedImages = [];
+  ST.doneSegs        = 0;
+  $('image-config-panel').style.display = 'none';
+  $('images-panel').style.display = 'none';
+  $('images-grid').innerHTML = '';
 
   // Cria sessão temporária no Tauri
   if (IS_TAURI) tauriSession = crypto.randomUUID();
@@ -1169,6 +1174,10 @@ async function populatePromptsPanel() {
   else if (ST.mode === 'prompts' || ST.mode === 'combined') title.textContent = 'Prompts gerados';
   else title.textContent = 'Conteúdo gerado';
 
+  // Mostra botão "Gerar imagens" só pra modos de prompts
+  const showGenImg = (ST.mode === 'prompts' || ST.mode === 'combined');
+  $('btn-gen-images').style.display = showGenImg ? '' : 'none';
+
   list.innerHTML = '';
   for (const item of items) {
     const card = document.createElement('div');
@@ -1220,6 +1229,285 @@ async function populatePromptsPanel() {
   });
 
   panel.style.display = 'block';
+}
+
+// ─── GERAÇÃO DE IMAGENS (Pollinations.ai) ────────────────────
+
+const POLLINATIONS_BASE = 'https://image.pollinations.ai/prompt/';
+
+// Traduz prompts em lote para inglês via Groq (resultados melhores na geração)
+async function translatePromptsToEnglish(prompts) {
+  if (!ST.apiKey) throw new Error('Chave Groq necessária para tradução automática.');
+
+  const numbered = prompts.map((p, i) => `${i + 1}. ${p}`).join('\n\n');
+  const userMsg = [
+    `Translate these image prompts from Portuguese to English.`,
+    `Keep all visual details (lighting, colors, composition, style words) vivid and explicit.`,
+    `Do NOT add or remove content — just translate faithfully.`,
+    `Respond ONLY with JSON: {"translations":["...","..."]}`,
+    `The array must have exactly ${prompts.length} items in the same order.`,
+    ``,
+    `Prompts:`,
+    numbered,
+  ].join('\n');
+
+  const res = await groqFetch(() => fetch(`${CFG.GROQ_BASE}/chat/completions`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${ST.apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: CFG.GROQ_TEXT,
+      messages: [{ role: 'user', content: userMsg }],
+      max_tokens: prompts.length * 250 + 100,
+      temperature: 0.3,
+    }),
+  }), 'Groq Translation');
+
+  const json = await res.json();
+  const raw  = (json.choices?.[0]?.message?.content || '').trim();
+
+  try {
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (m) {
+      const obj = JSON.parse(m[0]);
+      const arr = obj.translations ?? obj.translated ?? Object.values(obj).find(Array.isArray);
+      if (Array.isArray(arr) && arr.length) {
+        return padArray(arr.map(String), prompts.length);
+      }
+    }
+  } catch (_) {}
+
+  throw new Error('Não foi possível interpretar tradução.');
+}
+
+// Gera UMA imagem via Pollinations. Retorna { blob } ou lança erro.
+async function generateOneImage(prompt, opts) {
+  const [w, h] = opts.aspect.split('x').map(Number);
+  const params = new URLSearchParams({
+    width:  String(w),
+    height: String(h),
+    model:  opts.model,
+    nologo: 'true',
+    seed:   String(opts.seed),
+  });
+  const url = `${POLLINATIONS_BASE}${encodeURIComponent(prompt)}?${params}`;
+
+  // Timeout de 90s — Pollinations às vezes demora bastante na fila
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 90_000);
+
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const blob = await res.blob();
+    if (!blob.type.startsWith('image/')) throw new Error('Resposta não é imagem');
+    return blob;
+  } finally {
+    clearTimeout(tid);
+  }
+}
+
+// Processa lista com concorrência limitada (Pollinations bloqueia se hammer demais)
+async function processConcurrent(items, fn, concurrency = 3) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const i = cursor++;
+      try {
+        results[i] = { ok: true, value: await fn(items[i], i) };
+      } catch (err) {
+        results[i] = { ok: false, error: errMsg(err) };
+      }
+    }
+  }
+  await Promise.all(Array(Math.min(concurrency, items.length)).fill(0).map(() => worker()));
+  return results;
+}
+
+// Compõe prompt final juntando estilo + personagem + texto da parte
+function composePrompt(baseText, style, character) {
+  const parts = [];
+  if (character?.trim()) parts.push(character.trim());
+  parts.push(baseText.trim());
+  if (style?.trim()) parts.push(style.trim());
+  return parts.join(', ');
+}
+
+// Inicia geração: lê configs, traduz se preciso, dispara concurrent
+async function startImageGeneration() {
+  const items = (ST.generatedTexts || []).slice();
+  if (!items.length) return showToast('Não há prompts para gerar imagens.', 'error');
+
+  // Coleta opções
+  const aspect    = $('img-aspect').value;
+  const model     = $('img-model').value;
+  const translate = $('img-translate').checked;
+  const style     = $('img-style').value.trim();
+  const character = $('img-character').value.trim();
+  const seed      = Math.floor(Math.random() * 1_000_000);
+
+  // Fecha config, mostra panel de imagens
+  $('image-config-panel').style.display = 'none';
+  $('btn-gen-images').disabled = true;
+  $('images-panel').style.display = 'block';
+  $('images-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+  const grid = $('images-grid');
+  grid.innerHTML = '';
+  ST.generatedImages = [];
+
+  // Cria cards placeholder
+  items.forEach((item, i) => {
+    const card = document.createElement('div');
+    card.className = 'image-card';
+    card.id = `img-card-${i}`;
+    card.innerHTML = `
+      <div class="image-card-preview">
+        <div class="image-card-loading">
+          <div class="image-card-spinner"></div>
+          <span>Aguardando…</span>
+        </div>
+        <div class="image-card-status" id="img-status-${i}">Fila</div>
+      </div>
+      <div class="image-card-info">
+        <span class="image-card-name">${escHtml(item.name)}</span>
+        <div class="image-card-actions">
+          <button class="image-card-btn" disabled title="Baixar">⬇</button>
+          <button class="image-card-btn" disabled title="Ver prompt">💬</button>
+        </div>
+      </div>
+    `;
+    grid.appendChild(card);
+  });
+
+  // Traduz se solicitado
+  let textsForImage = items.map(i => i.text);
+  if (translate) {
+    $('images-panel-sub').textContent = 'Traduzindo prompts para inglês…';
+    try {
+      textsForImage = await translatePromptsToEnglish(textsForImage);
+      addLog('Prompts traduzidos para inglês ✓', 'success');
+    } catch (err) {
+      addLog('Tradução falhou: ' + errMsg(err) + ' — usando prompts originais.', 'warn');
+    }
+  }
+
+  // Gera com concorrência 3
+  $('images-panel-sub').textContent = `Gerando ${items.length} imagens (3 em paralelo)…`;
+  let doneCount = 0;
+  const updateSub = () => { $('images-panel-sub').textContent = `${doneCount}/${items.length} prontas`; };
+
+  const tasks = items.map((it, i) => async () => {
+    const card = $(`img-card-${i}`);
+    const status = $(`img-status-${i}`);
+    status.textContent = 'Gerando…';
+    card.querySelector('.image-card-loading span').textContent = 'Gerando…';
+
+    const finalPrompt = composePrompt(textsForImage[i], style, character);
+    try {
+      const blob = await generateOneImage(finalPrompt, { aspect, model, seed: seed + i });
+      const url = URL.createObjectURL(blob);
+
+      // Substitui placeholder pela imagem
+      const preview = card.querySelector('.image-card-preview');
+      preview.innerHTML = `
+        <img src="${url}" alt="${escHtml(it.name)}" loading="lazy" />
+        <div class="image-card-status done">✓</div>
+      `;
+      // Habilita botões
+      const actions = card.querySelectorAll('.image-card-btn');
+      actions.forEach(b => { b.disabled = false; });
+      actions[0].onclick = () => triggerDownload(blob, `${it.name}.jpg`);
+      actions[1].onclick = () => alert(`Prompt usado:\n\n${finalPrompt}`);
+
+      ST.generatedImages[i] = { idx: it.idx, name: it.name, blob, ok: true };
+    } catch (err) {
+      const msg = errMsg(err);
+      addLog(`✗ ${it.name}: ${msg}`, 'error');
+      const preview = card.querySelector('.image-card-preview');
+      preview.innerHTML = `
+        <div class="image-card-error">
+          ❌ Falhou<br><span style="opacity:0.7">${escHtml(msg.slice(0, 80))}</span>
+        </div>
+        <div class="image-card-status error">!</div>
+      `;
+      ST.generatedImages[i] = { idx: it.idx, name: it.name, ok: false, error: msg };
+    } finally {
+      doneCount++;
+      updateSub();
+    }
+  });
+
+  // Roda com concorrência 3 (Pollinations não gosta de muitas requisições simultâneas)
+  let cursor = 0;
+  async function worker() {
+    while (cursor < tasks.length) await tasks[cursor++]();
+  }
+  await Promise.all([worker(), worker(), worker()]);
+
+  // Resultado final
+  const okCount = ST.generatedImages.filter(x => x?.ok).length;
+  const failCount = items.length - okCount;
+  $('images-panel-sub').textContent = failCount
+    ? `${okCount}/${items.length} prontas · ${failCount} falharam`
+    : `${okCount}/${items.length} prontas — todas geradas!`;
+  $('btn-retry-failed').style.display = failCount ? '' : 'none';
+
+  $('btn-gen-images').disabled = false;
+  if (okCount > 0) showToast(`${okCount} imagens geradas!`, 'success');
+}
+
+async function downloadAllImages() {
+  const ok = (ST.generatedImages || []).filter(x => x?.ok);
+  if (!ok.length) return showToast('Nenhuma imagem para baixar.', 'error');
+  showToast(`Gerando ZIP com ${ok.length} imagens…`, 'info');
+  const zip = new JSZip();
+  for (const img of ok) zip.file(`${img.name}.jpg`, img.blob);
+  const content = await zip.generateAsync({ type: 'blob' });
+  triggerDownload(content, 'Zabiss-Imagens.zip');
+  showToast('ZIP baixado!', 'success');
+}
+
+async function retryFailedImages() {
+  const failed = (ST.generatedImages || [])
+    .map((x, i) => ({ x, i }))
+    .filter(({ x }) => x && !x.ok);
+  if (!failed.length) return;
+
+  const aspect    = $('img-aspect').value;
+  const model     = $('img-model').value;
+  const seed      = Math.floor(Math.random() * 1_000_000);
+  const style     = $('img-style').value.trim();
+  const character = $('img-character').value.trim();
+
+  for (const { x, i } of failed) {
+    const item = ST.generatedTexts[i];
+    if (!item) continue;
+    const card = $(`img-card-${i}`);
+    const preview = card.querySelector('.image-card-preview');
+    preview.innerHTML = `
+      <div class="image-card-loading">
+        <div class="image-card-spinner"></div>
+        <span>Tentando de novo…</span>
+      </div>
+    `;
+    try {
+      const finalPrompt = composePrompt(item.text, style, character);
+      const blob = await generateOneImage(finalPrompt, { aspect, model, seed: seed + i });
+      const url = URL.createObjectURL(blob);
+      preview.innerHTML = `<img src="${url}" loading="lazy"/><div class="image-card-status done">✓</div>`;
+      const actions = card.querySelectorAll('.image-card-btn');
+      actions.forEach(b => { b.disabled = false; });
+      actions[0].onclick = () => triggerDownload(blob, `${item.name}.jpg`);
+      ST.generatedImages[i] = { idx: item.idx, name: item.name, blob, ok: true };
+    } catch (err) {
+      preview.innerHTML = `<div class="image-card-error">❌ Falhou de novo</div>`;
+    }
+  }
+
+  const okCount = ST.generatedImages.filter(x => x?.ok).length;
+  $('images-panel-sub').textContent = `${okCount}/${ST.generatedImages.length} prontas`;
+  if (okCount === ST.generatedImages.length) $('btn-retry-failed').style.display = 'none';
 }
 
 function showResults() {
@@ -1632,6 +1920,29 @@ function init() {
   $('btn-new-process').addEventListener('click', resetAll);
   $('btn-new-standalone').addEventListener('click', resetAll);
 
+  // Geração de imagens
+  $('btn-gen-images').addEventListener('click', () => {
+    if (!ST.apiKey) {
+      showToast('Configure sua chave Groq para tradução (ou desmarque "traduzir").', 'warn');
+    }
+    $('image-config-panel').style.display = 'block';
+    $('image-config-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  $('image-config-close').addEventListener('click', () => {
+    $('image-config-panel').style.display = 'none';
+  });
+  $('btn-cancel-img-gen').addEventListener('click', () => {
+    $('image-config-panel').style.display = 'none';
+  });
+  $('btn-start-img-gen').addEventListener('click', () => {
+    startImageGeneration().catch(err => {
+      showToast('Erro: ' + errMsg(err), 'error');
+      $('btn-gen-images').disabled = false;
+    });
+  });
+  $('btn-download-all-images').addEventListener('click', downloadAllImages);
+  $('btn-retry-failed').addEventListener('click', retryFailedImages);
+
   // Converter
   const convDrop = $('conv-drop');
   const convFileInput = $('conv-file-input');
@@ -1698,6 +2009,10 @@ function resetAll() {
   $('progress-segments').innerHTML = '';
   $('prompts-panel').style.display = 'none';
   $('prompts-list').innerHTML = '';
+  $('image-config-panel').style.display = 'none';
+  $('images-panel').style.display = 'none';
+  $('images-grid').innerHTML = '';
+  ST.generatedImages = [];
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
