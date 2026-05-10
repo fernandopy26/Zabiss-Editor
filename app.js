@@ -95,12 +95,33 @@ let ST = {
   apiKey:       localStorage.getItem('zabiss_groq_key') || '',
   segDur:       CFG.SEG_DEFAULT,
   lang:         'pt',
-  promptLevel:  3,
-  customPrompt: '',
-  outputFiles:  [],
-  totalSegs:    0,
-  doneSegs:     0,
+  promptLevel:    3,
+  customPrompt:   '',
+  saveTxtFiles:   false, // checkbox: salvar prompts/combined como .txt além do painel
+  outputFiles:    [],    // arquivos para baixar (zip/pasta)
+  generatedTexts: [],    // [{idx, name, text}] para exibir no painel (independente de salvar)
+  totalSegs:      0,
+  doneSegs:       0,
 };
+
+// Push helper: adiciona texto ao painel SEMPRE e ao outputFiles condicionalmente
+function pushTextOutput(idx, text, mustSave) {
+  ST.generatedTexts.push({ idx, name: `Parte ${idx}`, text });
+  if (mustSave) {
+    ST.outputFiles.push({
+      name: `Parte ${idx}.txt`,
+      blob: new Blob([text], { type: 'text/plain;charset=utf-8' }),
+      type: 'text',
+    });
+  }
+}
+
+// Decide se este modo deve salvar .txt no disco
+function shouldSaveTxt() {
+  if (ST.mode === 'transcribe') return true;             // transcrição sempre salva
+  if (ST.mode === 'prompts' || ST.mode === 'combined') return ST.saveTxtFiles;
+  return false;
+}
 
 // ─── PROMPT LEVELS ───────────────────────────────
 const PROMPT_LEVELS = {
@@ -629,18 +650,15 @@ async function runTranscribeMode(segs) {
 
   if (results) {
     setProgress(90, 'Salvando arquivos…');
+    const save = shouldSaveTxt();
     for (let i = 0; i < segs.length; i++) {
       const r = results[i];
       const txt = r.text || '[Nenhuma fala detectada]';
       setSegActive(r.idx);
-      ST.outputFiles.push({
-        name: `Parte ${r.idx}.txt`,
-        blob: new Blob([txt], { type: 'text/plain;charset=utf-8' }),
-        type: 'text',
-      });
+      pushTextOutput(r.idx, txt, save);
       ST.doneSegs++;
       setSegDone(r.idx);
-      addLog(`  ✓ Parte ${r.idx}.txt — "${txt.slice(0, 55)}…"`, 'success');
+      addLog(`  ✓ Parte ${r.idx} — "${txt.slice(0, 55)}…"`, 'success');
     }
     unlinkInput();
     return;
@@ -648,6 +666,7 @@ async function runTranscribeMode(segs) {
 
   // Fallback: método antigo (1 chamada por segmento)
   addLog(`Modo lento: ${segs.length} chamadas separadas…`, 'info');
+  const save = shouldSaveTxt();
   for (let i = 0; i < segs.length; i++) {
     const seg = segs[i];
     setSegActive(seg.idx);
@@ -655,10 +674,10 @@ async function runTranscribeMode(segs) {
     const audioBlob = await extractAudioSegment(seg.start, seg.end, seg.idx);
     const text    = await groqTranscribe(audioBlob);
     const content = text || '[Nenhuma fala detectada]';
-    ST.outputFiles.push({ name: `Parte ${seg.idx}.txt`, blob: new Blob([content], { type: 'text/plain;charset=utf-8' }), type: 'text' });
+    pushTextOutput(seg.idx, content, save);
     ST.doneSegs++;
     setSegDone(seg.idx);
-    addLog(`  ✓ Parte ${seg.idx}.txt — "${content.slice(0, 55)}…"`, 'success');
+    addLog(`  ✓ Parte ${seg.idx} — "${content.slice(0, 55)}…"`, 'success');
     if (i < segs.length - 1) await sleep(3500);
   }
   unlinkInput();
@@ -700,11 +719,12 @@ async function runVideoPromptsMode(segs) {
   }
 
   setProgress(94, 'Salvando arquivos…');
+  const save = shouldSaveTxt();
   for (let i = 0; i < total; i++) {
     const prompt = allPrompts[i] || '—';
-    ST.outputFiles.push({ name: `Parte ${segs[i].idx}.txt`, blob: new Blob([prompt], { type: 'text/plain;charset=utf-8' }), type: 'text' });
+    pushTextOutput(segs[i].idx, prompt, save);
     ST.doneSegs++;
-    addLog(`  ✓ Parte ${segs[i].idx}.txt — "${prompt.slice(0, 70)}…"`, 'success');
+    addLog(`  ✓ Parte ${segs[i].idx} — "${prompt.slice(0, 70)}…"`, 'success');
   }
 }
 
@@ -761,11 +781,12 @@ async function runAudioPromptsMode(segs) {
   }
 
   setProgress(94, 'Salvando arquivos…');
+  const save = shouldSaveTxt();
   for (let i = 0; i < total; i++) {
     const prompt = allPrompts[i] || '—';
-    ST.outputFiles.push({ name: `Parte ${segs[i].idx}.txt`, blob: new Blob([prompt], { type: 'text/plain;charset=utf-8' }), type: 'text' });
+    pushTextOutput(segs[i].idx, prompt, save);
     ST.doneSegs++;
-    addLog(`  ✓ Parte ${segs[i].idx}.txt — "${prompt.slice(0, 70)}…"`, 'success');
+    addLog(`  ✓ Parte ${segs[i].idx} — "${prompt.slice(0, 70)}…"`, 'success');
   }
 }
 
@@ -819,10 +840,11 @@ async function runVideoCombinedMode(segs) {
   }
 
   setProgress(93, 'Salvando prompts…');
+  const save = shouldSaveTxt();
   for (let i = 0; i < total; i++) {
     const prompt = allPrompts[i] || '—';
-    ST.outputFiles.push({ name: `Parte ${segs[i].idx}.txt`, blob: new Blob([prompt], { type: 'text/plain;charset=utf-8' }), type: 'text' });
-    addLog(`  ✓ Parte ${segs[i].idx}.txt`, 'success');
+    pushTextOutput(segs[i].idx, prompt, save);
+    addLog(`  ✓ Parte ${segs[i].idx}`, 'success');
   }
 }
 
@@ -889,10 +911,11 @@ async function runAudioCombinedMode(segs) {
   }
 
   setProgress(93, 'Salvando prompts…');
+  const save = shouldSaveTxt();
   for (let i = 0; i < total; i++) {
     const prompt = allPrompts[i] || '—';
-    ST.outputFiles.push({ name: `Parte ${segs[i].idx}.txt`, blob: new Blob([prompt], { type: 'text/plain;charset=utf-8' }), type: 'text' });
-    addLog(`  ✓ Parte ${segs[i].idx}.txt`, 'success');
+    pushTextOutput(segs[i].idx, prompt, save);
+    addLog(`  ✓ Parte ${segs[i].idx}`, 'success');
   }
 }
 
@@ -906,8 +929,9 @@ async function processMedia() {
   const needsApi = ST.mode !== 'cut';
   if (needsApi && !ST.apiKey) return showToast('Insira sua chave de API Groq nas configurações.', 'error');
 
-  ST.outputFiles = [];
-  ST.doneSegs    = 0;
+  ST.outputFiles    = [];
+  ST.generatedTexts = [];
+  ST.doneSegs       = 0;
 
   // Cria sessão temporária no Tauri
   if (IS_TAURI) tauriSession = crypto.randomUUID();
@@ -1133,9 +1157,9 @@ async function populatePromptsPanel() {
   const list  = $('prompts-list');
   const title = $('prompts-panel-title');
 
-  // Pega todos os arquivos de texto (transcrição, prompts, etc.)
-  const textFiles = ST.outputFiles.filter(f => f.type === 'text');
-  if (!textFiles.length) {
+  // Pega todos os textos gerados (do generatedTexts, independente de salvar como .txt)
+  const items = (ST.generatedTexts || []).slice();
+  if (!items.length) {
     panel.style.display = 'none';
     return;
   }
@@ -1144,12 +1168,6 @@ async function populatePromptsPanel() {
   if (ST.mode === 'transcribe') title.textContent = 'Transcrições por parte';
   else if (ST.mode === 'prompts' || ST.mode === 'combined') title.textContent = 'Prompts gerados';
   else title.textContent = 'Conteúdo gerado';
-
-  // Lê o conteúdo de todos os blobs de texto
-  const items = await Promise.all(textFiles.map(async f => ({
-    name: f.name.replace(/\.txt$/, ''),
-    text: await f.blob.text(),
-  })));
 
   list.innerHTML = '';
   for (const item of items) {
@@ -1239,7 +1257,19 @@ function showResults() {
   if (textCount)  stats.push(`<span class="stat-pill stat-texts">📝 ${textCount} textos</span>`);
   stats.push(`<span class="stat-pill stat-size">📦 ${fmtSize(totalSize)}</span>`);
   $('results-stats').innerHTML = stats.join('');
-  $('results-title').textContent = `${ST.outputFiles.length} arquivo${ST.outputFiles.length !== 1 ? 's' : ''} gerado${ST.outputFiles.length !== 1 ? 's' : ''}`;
+
+  // Se não há arquivos para baixar mas há textos no painel, esconde card de arquivos
+  const hasFiles = ST.outputFiles.length > 0;
+  const hasTexts = (ST.generatedTexts || []).length > 0;
+  $('results-card-wrap').style.display = hasFiles ? '' : 'none';
+
+  if (hasFiles) {
+    $('results-title').textContent = `${ST.outputFiles.length} arquivo${ST.outputFiles.length !== 1 ? 's' : ''} gerado${ST.outputFiles.length !== 1 ? 's' : ''}`;
+  }
+
+  // Se há textos sem arquivos para baixar, garante que o botão "Novo processamento" fique visível
+  $('btn-new-standalone').style.display = (!hasFiles && hasTexts) ? '' : 'none';
+
   section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   // Popula painel de textos com botões de copiar (async, não bloqueia)
@@ -1524,6 +1554,12 @@ function init() {
     });
   });
 
+  // Checkbox: salvar prompts como .txt
+  $('save-txt-checkbox').checked = ST.saveTxtFiles;
+  $('save-txt-checkbox').addEventListener('change', e => {
+    ST.saveTxtFiles = e.target.checked;
+  });
+
   // Custom prompt
   const customInput   = $('custom-prompt-input');
   const customCounter = $('custom-prompt-len');
@@ -1594,6 +1630,7 @@ function init() {
   $('btn-download-zip').addEventListener('click', downloadZip);
   $('btn-save-folder').addEventListener('click', saveToFolder);
   $('btn-new-process').addEventListener('click', resetAll);
+  $('btn-new-standalone').addEventListener('click', resetAll);
 
   // Converter
   const convDrop = $('conv-drop');
@@ -1633,6 +1670,7 @@ function updateSettingsVisibility() {
   $('api-key-group').style.display       = needsApi    ? '' : 'none';
   $('level-group').style.display         = needsPrompt ? '' : 'none';
   $('custom-prompt-group').style.display = needsPrompt ? '' : 'none';
+  $('output-options-group').style.display = needsPrompt ? '' : 'none';
   $('model-group').style.display         = needsVision ? '' : 'none';
   $('lang-group').style.display          = ST.mode === 'transcribe' ? '' : 'none';
   if (needsApi && !ST.apiKey) { $('settings-panel').classList.add('open'); $('api-key-note').style.display = ''; }
@@ -1651,7 +1689,7 @@ function resetUpload() {
 
 function resetAll() {
   resetUpload();
-  ST.outputFiles = []; ST.mode = null; ST.doneSegs = 0;
+  ST.outputFiles = []; ST.generatedTexts = []; ST.mode = null; ST.doneSegs = 0;
   $$$('.mode-card').forEach(c => c.classList.remove('active'));
   $('progress-section').classList.remove('visible');
   $('results-section').classList.remove('visible');

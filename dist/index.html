@@ -274,6 +274,18 @@
                 </div>
               </div>
 
+              <!-- Output options (prompts/combined modes) -->
+              <div class="form-group full-width" id="output-options-group" style="display:none">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="save-txt-checkbox" />
+                  <span class="checkbox-mark"></span>
+                  <span class="checkbox-text">
+                    Salvar também como arquivos <code>.txt</code>
+                    <span class="checkbox-hint">Os prompts já aparecem no painel para copiar. Marque se quiser também baixá-los como arquivos.</span>
+                  </span>
+                </label>
+              </div>
+
               <!-- Custom prompt -->
               <div class="form-group full-width" id="custom-prompt-group" style="display:none">
                 <label for="custom-prompt-input">
@@ -372,7 +384,7 @@
         <div class="prompts-list" id="prompts-list"></div>
       </div>
 
-      <div class="results-card">
+      <div class="results-card" id="results-card-wrap">
         <div class="results-summary">
           <div class="results-icon">🎉</div>
           <div>
@@ -396,6 +408,11 @@
           </button>
         </div>
       </div>
+
+      <!-- Botão standalone para quando não há arquivos (só painel de prompts) -->
+      <button class="btn-new" id="btn-new-standalone" type="button" style="display:none;margin-top:8px">
+        ↩ Novo processamento
+      </button>
     </div>
 
     <!-- CONVERSOR -->
