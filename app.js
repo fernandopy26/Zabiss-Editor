@@ -1279,31 +1279,57 @@ async function translatePromptsToEnglish(prompts) {
   throw new Error('Não foi possível interpretar tradução.');
 }
 
-// Gera UMA imagem via Pollinations. Retorna { blob } ou lança erro.
-async function generateOneImage(prompt, opts) {
+// Gera UMA imagem via Pollinations com retry em caso de rate limit (429).
+// onWait recebe segundos restantes pra mostrar contagem na UI.
+async function generateOneImage(prompt, opts, onWait) {
   const [w, h] = opts.aspect.split('x').map(Number);
   const params = new URLSearchParams({
-    width:  String(w),
-    height: String(h),
-    model:  opts.model,
-    nologo: 'true',
-    seed:   String(opts.seed),
+    width:    String(w),
+    height:   String(h),
+    model:    opts.model,
+    nologo:   'true',
+    seed:     String(opts.seed),
+    referrer: 'zabiss-editor', // identifica o app — Pollinations dá rate limit melhor
   });
   const url = `${POLLINATIONS_BASE}${encodeURIComponent(prompt)}?${params}`;
 
-  // Timeout de 90s — Pollinations às vezes demora bastante na fila
-  const ctrl = new AbortController();
-  const tid = setTimeout(() => ctrl.abort(), 90_000);
+  const maxAttempts = 4;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const ctrl = new AbortController();
+    const tid = setTimeout(() => ctrl.abort(), 120_000);
 
-  try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const blob = await res.blob();
-    if (!blob.type.startsWith('image/')) throw new Error('Resposta não é imagem');
-    return blob;
-  } finally {
-    clearTimeout(tid);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(tid);
+
+      // Rate limit: espera e tenta de novo (10s, 25s, 50s)
+      if (res.status === 429) {
+        if (attempt >= maxAttempts) throw new Error('Pollinations rate limit (429) — tente novamente daqui alguns minutos.');
+        const waitSec = [10, 25, 50][attempt - 1] || 60;
+        if (onWait) onWait(waitSec, attempt, maxAttempts);
+        for (let s = waitSec; s > 0; s--) {
+          if (onWait) onWait(s, attempt, maxAttempts);
+          await sleep(1000);
+        }
+        continue;
+      }
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      if (!blob.type.startsWith('image/')) throw new Error('Resposta não é imagem');
+      return blob;
+    } catch (err) {
+      clearTimeout(tid);
+      const msg = errMsg(err);
+      // Se for timeout ou erro de rede, retry curto
+      if (attempt < maxAttempts && (err.name === 'AbortError' || msg.includes('Failed to fetch') || msg.includes('NetworkError'))) {
+        await sleep(3000);
+        continue;
+      }
+      throw err;
+    }
   }
+  throw new Error('Falha após todas as tentativas');
 }
 
 // Processa lista com concorrência limitada (Pollinations bloqueia se hammer demais)
@@ -1392,35 +1418,50 @@ async function startImageGeneration() {
     }
   }
 
-  // Gera com concorrência 3
-  $('images-panel-sub').textContent = `Gerando ${items.length} imagens (3 em paralelo)…`;
-  let doneCount = 0;
-  const updateSub = () => { $('images-panel-sub').textContent = `${doneCount}/${items.length} prontas`; };
+  // Pollinations tem rate limit estrito — gera 1 por vez com delay
+  const DELAY_BETWEEN = 5000; // 5s entre cada imagem
+  const estTime = Math.ceil((items.length * (15 + DELAY_BETWEEN / 1000)) / 60);
+  $('images-panel-sub').textContent = `Gerando ${items.length} imagens (~${estTime} min, sequencial)…`;
+  addLog(`Geração de imagens: ${items.length} imagens, ~${estTime} min estimados.`, 'info');
 
-  const tasks = items.map((it, i) => async () => {
+  let doneCount = 0;
+  const updateSub = () => {
+    $('images-panel-sub').textContent = `${doneCount}/${items.length} prontas`;
+  };
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
     const card = $(`img-card-${i}`);
     const status = $(`img-status-${i}`);
+    const loadingLabel = card.querySelector('.image-card-loading span');
+
     status.textContent = 'Gerando…';
-    card.querySelector('.image-card-loading span').textContent = 'Gerando…';
+    loadingLabel.textContent = 'Gerando…';
 
     const finalPrompt = composePrompt(textsForImage[i], style, character);
+
+    // Callback para mostrar countdown durante espera de rate limit
+    const onWait = (sec, attempt, max) => {
+      status.textContent = `Aguardando ${sec}s`;
+      loadingLabel.textContent = `Rate limit — esperando ${sec}s (tentativa ${attempt}/${max})`;
+    };
+
     try {
-      const blob = await generateOneImage(finalPrompt, { aspect, model, seed: seed + i });
+      const blob = await generateOneImage(finalPrompt, { aspect, model, seed: seed + i }, onWait);
       const url = URL.createObjectURL(blob);
 
-      // Substitui placeholder pela imagem
       const preview = card.querySelector('.image-card-preview');
       preview.innerHTML = `
         <img src="${url}" alt="${escHtml(it.name)}" loading="lazy" />
         <div class="image-card-status done">✓</div>
       `;
-      // Habilita botões
       const actions = card.querySelectorAll('.image-card-btn');
       actions.forEach(b => { b.disabled = false; });
       actions[0].onclick = () => triggerDownload(blob, `${it.name}.jpg`);
       actions[1].onclick = () => alert(`Prompt usado:\n\n${finalPrompt}`);
 
       ST.generatedImages[i] = { idx: it.idx, name: it.name, blob, ok: true };
+      addLog(`✓ ${it.name} gerada`, 'success');
     } catch (err) {
       const msg = errMsg(err);
       addLog(`✗ ${it.name}: ${msg}`, 'error');
@@ -1436,14 +1477,18 @@ async function startImageGeneration() {
       doneCount++;
       updateSub();
     }
-  });
 
-  // Roda com concorrência 3 (Pollinations não gosta de muitas requisições simultâneas)
-  let cursor = 0;
-  async function worker() {
-    while (cursor < tasks.length) await tasks[cursor++]();
+    // Delay entre imagens — exceto na última
+    if (i < items.length - 1) {
+      const nextStatus = $(`img-status-${i + 1}`);
+      const nextLabel = $(`img-card-${i + 1}`).querySelector('.image-card-loading span');
+      for (let s = DELAY_BETWEEN / 1000; s > 0; s--) {
+        nextStatus.textContent = `Em ${s}s`;
+        nextLabel.textContent = `Próxima em ${s}s…`;
+        await sleep(1000);
+      }
+    }
   }
-  await Promise.all([worker(), worker(), worker()]);
 
   // Resultado final
   const okCount = ST.generatedImages.filter(x => x?.ok).length;
@@ -1480,7 +1525,8 @@ async function retryFailedImages() {
   const style     = $('img-style').value.trim();
   const character = $('img-character').value.trim();
 
-  for (const { x, i } of failed) {
+  for (let k = 0; k < failed.length; k++) {
+    const { i } = failed[k];
     const item = ST.generatedTexts[i];
     if (!item) continue;
     const card = $(`img-card-${i}`);
@@ -1488,12 +1534,25 @@ async function retryFailedImages() {
     preview.innerHTML = `
       <div class="image-card-loading">
         <div class="image-card-spinner"></div>
-        <span>Tentando de novo…</span>
+        <span class="image-card-loading-label">Tentando de novo…</span>
       </div>
     `;
+    const status = card.querySelector('.image-card-status') || (() => {
+      const s = document.createElement('div');
+      s.className = 'image-card-status';
+      preview.appendChild(s);
+      return s;
+    })();
+    const lbl = preview.querySelector('.image-card-loading-label');
+
+    const onWait = (sec) => {
+      status.textContent = `Aguardando ${sec}s`;
+      if (lbl) lbl.textContent = `Rate limit — ${sec}s…`;
+    };
+
     try {
       const finalPrompt = composePrompt(item.text, style, character);
-      const blob = await generateOneImage(finalPrompt, { aspect, model, seed: seed + i });
+      const blob = await generateOneImage(finalPrompt, { aspect, model, seed: seed + i }, onWait);
       const url = URL.createObjectURL(blob);
       preview.innerHTML = `<img src="${url}" loading="lazy"/><div class="image-card-status done">✓</div>`;
       const actions = card.querySelectorAll('.image-card-btn');
@@ -1501,8 +1560,11 @@ async function retryFailedImages() {
       actions[0].onclick = () => triggerDownload(blob, `${item.name}.jpg`);
       ST.generatedImages[i] = { idx: item.idx, name: item.name, blob, ok: true };
     } catch (err) {
-      preview.innerHTML = `<div class="image-card-error">❌ Falhou de novo</div>`;
+      preview.innerHTML = `<div class="image-card-error">❌ ${escHtml(errMsg(err).slice(0, 80))}</div>`;
     }
+
+    // Delay entre retries também
+    if (k < failed.length - 1) await sleep(5000);
   }
 
   const okCount = ST.generatedImages.filter(x => x?.ok).length;
