@@ -1727,6 +1727,8 @@ function setInputType(type) {
   $('upload-icon-el').textContent = type === 'audio' ? '🎵' : '🎬';
   $('upload-title-el').textContent = type === 'audio' ? 'Arraste seu áudio aqui' : 'Arraste seu vídeo aqui';
   $('upload-sub-el').textContent   = type === 'audio' ? 'MP3, WAV, M4A, OGG, FLAC e outros formatos de áudio' : 'MP4, MOV, AVI, WebM e outros formatos de vídeo';
+  // Update process button label
+  $('process-btn-label').textContent = type === 'audio' ? 'Processar Áudio' : 'Processar Vídeo';
   // Update mode cards
   updateModeCards();
   // Clear current file if switching types
@@ -2136,6 +2138,80 @@ function compareVersions(a, b) {
   return 0;
 }
 
+// Detecta plataforma e escolhe o melhor instalador disponível na release
+function selectPlatformAsset(assets) {
+  if (!assets || !assets.length) return null;
+  const ua = (navigator.userAgent || '').toLowerCase();
+  const plat = (navigator.platform || '').toLowerCase();
+
+  let patterns = [];
+  if (ua.includes('win') || plat.includes('win')) {
+    patterns = [/\.msi$/i, /-setup\.exe$/i, /\.exe$/i];
+  } else if (ua.includes('mac') || plat.includes('mac')) {
+    patterns = [/\.dmg$/i];
+  } else {
+    // Linux: prefere AppImage (portável), depois deb
+    patterns = [/\.AppImage$/i, /\.deb$/i];
+  }
+
+  for (const p of patterns) {
+    const match = assets.find(a => p.test(a.name) && !/\.sig$/.test(a.name));
+    if (match) return match;
+  }
+  return null;
+}
+
+// Baixa o instalador com progresso e abre direto no SO
+async function downloadAndInstallUpdate(asset, btn, releaseUrl) {
+  const origHTML = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span>📥</span><span>Iniciando…</span>';
+
+  let unlisten = null;
+  try {
+    // Escuta eventos de progresso emitidos pelo Rust
+    if (window.__TAURI__?.event?.listen) {
+      unlisten = await window.__TAURI__.event.listen('update-progress', (event) => {
+        const { received, total } = event.payload || {};
+        const mb = (received / 1024 / 1024).toFixed(1);
+        if (total > 0) {
+          const pct = Math.round((received / total) * 100);
+          const totalMb = (total / 1024 / 1024).toFixed(1);
+          btn.innerHTML = `<span>📥</span><span>${pct}% — ${mb}/${totalMb}MB</span>`;
+        } else {
+          btn.innerHTML = `<span>📥</span><span>Baixado ${mb}MB</span>`;
+        }
+      });
+    }
+
+    const path = await tauriInvoke('download_update_file', {
+      url:      asset.browser_download_url,
+      filename: asset.name,
+    });
+
+    if (unlisten) { try { unlisten(); } catch (_) {} unlisten = null; }
+
+    btn.innerHTML = '<span>📦</span><span>Abrindo instalador…</span>';
+    await tauriInvoke('open_installer', { path });
+
+    const isAppImage = /\.AppImage$/i.test(asset.name);
+    const msg = isAppImage
+      ? 'Arquivo baixado! Feche o Zabiss Editor e execute o novo arquivo na pasta aberta.'
+      : 'Instalador aberto! Siga as instruções para concluir a atualização.';
+    showToast(msg, 'success');
+    btn.innerHTML = '<span>✓</span><span>Pronto!</span>';
+  } catch (err) {
+    if (unlisten) { try { unlisten(); } catch (_) {} }
+    showToast('Erro ao baixar: ' + errMsg(err) + ' — abrindo página de download.', 'warn');
+    // Fallback: abre a página de releases
+    try {
+      await window.__TAURI__.shell.open(releaseUrl);
+    } catch (_) {}
+    btn.disabled = false;
+    btn.innerHTML = origHTML;
+  }
+}
+
 function showUpdateBanner(version, notes, releaseUrl) {
   const old = document.getElementById('update-banner');
   if (old) old.remove();
@@ -2158,8 +2234,8 @@ function showUpdateBanner(version, notes, releaseUrl) {
       ${escHtml(shortNotes)}
     </div>
     <div style="display:flex;gap:8px">
-      <button id="btn-do-update" style="flex:1;padding:9px;background:#fff;color:#7c3aed;border:none;border-radius:50px;font-weight:700;font-size:13px;cursor:pointer">
-        🌐 Ver downloads
+      <button id="btn-do-update" style="flex:1;padding:9px;background:#fff;color:#7c3aed;border:none;border-radius:50px;font-weight:700;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px">
+        <span>⬇</span><span>Baixar e instalar</span>
       </button>
       <button id="btn-update-later" style="padding:9px 14px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:50px;font-size:13px;cursor:pointer">
         Depois
@@ -2167,13 +2243,25 @@ function showUpdateBanner(version, notes, releaseUrl) {
     </div>`;
   document.body.appendChild(banner);
 
-  document.getElementById('btn-do-update').addEventListener('click', async () => {
+  document.getElementById('btn-do-update').addEventListener('click', async function() {
     try {
-      await window.__TAURI__.shell.open(releaseUrl);
-      showToast('Página de download aberta no navegador.', 'success');
-      banner.remove();
+      // Busca info completa da release pra pegar os assets
+      const res = await fetch('https://api.github.com/repos/fernandopy26/Zabiss-Editor/releases/latest');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const release = await res.json();
+      const asset = selectPlatformAsset(release.assets);
+
+      if (asset) {
+        // Download direto no app + abre instalador
+        await downloadAndInstallUpdate(asset, this, releaseUrl);
+      } else {
+        // Fallback: nenhum instalador combina com a plataforma — abre browser
+        await window.__TAURI__.shell.open(releaseUrl);
+        showToast('Abrindo página de downloads (instalador não detectado).', 'info');
+        banner.remove();
+      }
     } catch (err) {
-      showToast('Erro ao abrir página: ' + errMsg(err), 'error');
+      showToast('Erro: ' + errMsg(err), 'error');
     }
   });
   document.getElementById('btn-update-later').addEventListener('click', () => banner.remove());

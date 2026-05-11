@@ -1,7 +1,8 @@
 use serde::Serialize;
 use std::path::Path;
-use tauri::Manager;
+use tauri::{Manager, Emitter};
 use base64::{Engine as _, engine::general_purpose};
+use futures_util::StreamExt;
 
 // ── Estruturas ───────────────────────────────────────────────
 
@@ -205,6 +206,100 @@ async fn extract_frame_at(
     Ok(general_purpose::STANDARD.encode(&bytes))
 }
 
+// ── Auto-Updater (download direto + abertura do instalador) ──
+
+#[derive(Clone, Serialize)]
+struct UpdateProgress {
+    received: u64,
+    total: u64,
+}
+
+/// Baixa o instalador da nova versão para uma pasta temp,
+/// emitindo eventos 'update-progress' durante o download.
+/// Retorna o caminho completo do arquivo baixado.
+#[tauri::command]
+async fn download_update_file(
+    app: tauri::AppHandle,
+    url: String,
+    filename: String,
+) -> Result<String, String> {
+    let temp_dir = std::env::temp_dir().join("zabiss-editor-update");
+    std::fs::create_dir_all(&temp_dir).map_err(|e| e.to_string())?;
+    let temp_path = temp_dir.join(&filename);
+
+    let resp = reqwest::get(&url).await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let total = resp.content_length().unwrap_or(0);
+
+    let mut file = tokio::fs::File::create(&temp_path).await.map_err(|e| e.to_string())?;
+    let mut stream = resp.bytes_stream();
+    let mut received: u64 = 0;
+
+    use tokio::io::AsyncWriteExt;
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|e| e.to_string())?;
+        file.write_all(&bytes).await.map_err(|e| e.to_string())?;
+        received += bytes.len() as u64;
+
+        let _ = app.emit("update-progress", UpdateProgress { received, total });
+    }
+
+    file.flush().await.map_err(|e| e.to_string())?;
+    Ok(temp_path.to_string_lossy().to_string())
+}
+
+/// Abre o instalador com o handler padrão do SO.
+/// Windows: Windows Installer abre o MSI/EXE
+/// macOS: monta o DMG
+/// Linux .deb: abre Software Center / GDebi
+/// Linux .AppImage: torna executável e abre a pasta (não dá pra rodar
+/// enquanto o atual está rodando — precisa fechar manualmente)
+#[tauri::command]
+fn open_installer(path: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let path_lower = path.to_lowercase();
+        if path_lower.ends_with(".appimage") {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&path).map_err(|e| e.to_string())?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).map_err(|e| e.to_string())?;
+
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                std::process::Command::new("xdg-open")
+                    .arg(parent)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+            }
+        } else {
+            std::process::Command::new("xdg-open")
+                .arg(&path)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/c", "start", "", &path])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
 // ── Versão atual do app ──────────────────────────────────────
 
 #[tauri::command]
@@ -232,6 +327,8 @@ pub fn run() {
             get_app_version,
             get_media_duration,
             extract_frame_at,
+            download_update_file,
+            open_installer,
         ])
         .run(tauri::generate_context!())
         .expect("Erro ao iniciar Zabiss Editor");
